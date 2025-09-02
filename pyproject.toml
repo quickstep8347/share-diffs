@@ -1,0 +1,23 @@
+[tool.poetry]
+name = "share-diffs"
+version = "0.1.0"
+description = ""
+authors = ["Joel Gotsch <joel.gotsch@gmail.com>"]
+readme = "README.md"
+packages = [{include = "share_diffs"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+cryptography = "^42.0.4"
+pydantic = "^2.10.6"
+gitpython = "^3.1.44"
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.2"
+isort = "^5.13.2"
+black = "^24.2.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
