@@ -3,18 +3,10 @@ from typing import Callable
 import unittest
 import tempfile
 import shutil
-from pydantic import TypeAdapter
 from pathlib import Path
-from share_diffs.main import (
-    checkout_all_repos,
-    get_diff,
-    apply_diff,
-    Repo
-)
-from git import Repo as GitRepo
-import json
+from share_diffs.repos import Repos
+from share_diffs.pdfs import attach_to_pdfs, recover_from_pdfs
 import hashlib
-from pathlib import Path
 
 def file_hash(file_path):
     """Compute SHA-256 hash of a file."""
@@ -27,13 +19,13 @@ def file_hash(file_path):
 def standard_filter_file(p: Path) -> bool:
     """excludes all files folders (and all its subfolders and files) that start with "."
     """
-    return not any(part.startswith(".") for part in p.relative_to(p.anchor).parts)
+    return (not any(part.startswith(".") for part in p.relative_to(p.anchor).parts)) and p.name != "repos.json"
 
 
 def folders_identical(folder1: str|Path, folder2: str|Path, filter_fn: None|Callable[[Path],bool]=standard_filter_file) -> bool:
     """Compare the contents of two folders recursively by file hashes. Returns true if they are identical.
-    filter_fn is a function that takes a Path and can decide to filter it or not. E.g. used to filter out
-    all folders starting with a "."
+    filter_fn is a function that takes a Path and can decide to filter it out or not. path that evaluates to
+    true are kept. E.g. used to filter out all folders starting with a ".", like ".git/*"
     """
     folder1, folder2 = Path(folder1), Path(folder2)
     
@@ -82,153 +74,91 @@ def folders_identical(folder1: str|Path, folder2: str|Path, filter_fn: None|Call
 class TestShareDiffsIntegration(unittest.TestCase):
     def setUp(self):
         # Create two temporary directories for old and new repositories
-        self.temp_dir_old = tempfile.mkdtemp(prefix="repo_old_")
-        self.temp_dir_new = tempfile.mkdtemp(prefix="repo_new_")
-        
-        # Define separate repo.json files for each
-        self.repo_file_old = Path(self.temp_dir_old) / "repos.json"
-        self.repo_file_new = Path(self.temp_dir_new) / "repos.json"
-        
-        # Repository URL to be used for the test
-        self.repo_url = "https://github.com/githubtraining/hellogitworld.git"
-        
-        # List containing only the test repository
-        self.repo_links = [self.repo_url]
-        
-        # Initialize both repositories
-        # After cloning, checkout to HEAD~10 in the old repo
-        self.old_repo_path = Path(self.temp_dir_old) / "hellogitworld"
-        self.old_repo = GitRepo.clone_from(self.repo_url, self.old_repo_path)
-
-        subprocess.run(
-            ["git", "reset", "--hard", 'HEAD~10'],
-            cwd=self.old_repo_path,
-            check=True,  # Raise an error if git apply fails
-        )
-        
-        # Update the repos.json for the old repository with the specific commit
-        ta = TypeAdapter(list[Repo])
-        repos_old = [Repo(path=str(self.old_repo_path))]
-        with open(self.repo_file_old, "wb") as f:
-            f.write(ta.dump_json(repos_old))
-
-        self.new_repo_path = Path(self.temp_dir_new) / "hellogitworld"
-        self.new_repo = GitRepo.clone_from(self.repo_url, self.new_repo_path)
-        subprocess.run(
-            ["git", "reset", "--hard", 'HEAD~10'],
-            cwd=self.new_repo_path,
-            check=True,  # Raise an error if git apply fails
-        )
-        repos_new = [Repo(path=str(self.new_repo_path), last_commit=self.new_repo.head.commit.hexsha)]
-        with open(self.repo_file_new, "wb") as f:
-            f.write(ta.dump_json(repos_new))
+        self.remote_git_dir = tempfile.mkdtemp(prefix="remote")
+        self.local_git_dir = tempfile.mkdtemp(prefix="local")
 
     def tearDown(self):
         # Remove temporary directories after the test
-        shutil.rmtree(self.temp_dir_old)
-        shutil.rmtree(self.temp_dir_new)
+        shutil.rmtree(self.remote_git_dir)
+        shutil.rmtree(self.local_git_dir)
 
     def test_diff_and_apply(self):
-        checkout_all_repos(
-            repo_links=self.repo_links,
-            root_folder=self.temp_dir_new,
-            repo_file=str(self.repo_file_new)
+        # first create local repo and check if files are the same
+        repo_links = [
+            "https://github.com/githubtraining/hellogitworld.git",
+            "https://github.com/example-repo/lerna-example.git"
+        ]
+        remote_repos = Repos(base_path=self.remote_git_dir)
+        for repo_link in repo_links:
+            remote_repos.add_repo(repo_link=repo_link)
+        
+        remote_repos.checkout_all()
+        subprocess.run(
+            ["git", "reset", "--hard", 'HEAD~10'],
+            cwd=Path(self.remote_git_dir)/"hellogitworld",
+            check=True,  # Raise an error if git apply fails
         )
-
+        diff_data = remote_repos.create_diffs()
+        local_repos = Repos(base_path=self.local_git_dir)
+        local_repos.apply_diffs(combined_diff=diff_data)
+        remote_repos.update_commit_hashes()
         self.assertTrue(
-            self.new_repo.active_branch.commit.hexsha == "ef7bebf8bdb1919d947afe46ab4b2fb4278039b3",
-            "It seems like the git pull didn't work properly"
-        )
-        self.assertTrue(
-            self.old_repo.active_branch.commit.hexsha == "bf7a9a5ee025edee0e610bd7ba23c0704b53c6db",
-            "This should be at Head~10"
-        )
-        
-        # Generate diffs based on the old repository state
-        diffs = get_diff(
-            repo_links=self.repo_links,
-            repo_file=str(self.repo_file_new)
-        )
-        
-        print("Applying diffs to the old repository...")
-        # Apply the diffs to the old repository
-        apply_diff(
-            diff=diffs,
-            root_folder=self.temp_dir_old
-        )
-        
-        # Note: In this setup, the commit hashes are not identical because the commit history is different.
-
-        # # Now, the old repository should be at the latest commit
-        # updated_old_repo = GitRepo(Path(self.temp_dir_old) / "hellogitworld")
-        
-        # # Ensure both repositories are on the same commit
-        # old_commit = updated_old_repo.head.commit.hexsha
-        # new_commit = self.new_repo.head.commit.hexsha
-        
-        # print(f"Old Repo Commit after applying diffs: {old_commit}")
-        # print(f"New Repo Commit: {new_commit}")
-        
-        self.assertTrue(
-            folders_identical(self.old_repo_path, self.new_repo_path),
+            folders_identical(self.local_git_dir, self.remote_git_dir),
             "After applying diffs, the old repository should match the new repository."
         )
-        
 
-class TestShareDiffsIntegrationEmptyRepo(unittest.TestCase):
+        # now again but with newest version of hellogitworld
+        remote_repos = Repos(base_path=self.remote_git_dir)
+        remote_repos.checkout_all()
+        diff_data = remote_repos.create_diffs()
+        local_repos = Repos(base_path=self.local_git_dir)
+        local_repos.apply_diffs(combined_diff=diff_data)
+        remote_repos.update_commit_hashes()
+        self.assertTrue(
+            folders_identical(self.local_git_dir, self.remote_git_dir),
+            "After applying diffs, the old repository should match the new repository."
+        )
+
+
+class TestShareDiffsPDFIntegration(unittest.TestCase):
     def setUp(self):
         # Create two temporary directories for old and new repositories
-        self.temp_dir_old = tempfile.mkdtemp(prefix="repo_old_")
-        self.temp_dir_new = tempfile.mkdtemp(prefix="repo_new_")
-        
-        
-        # Repository URL to be used for the test
-        self.repo_url = "https://github.com/githubtraining/hellogitworld.git"
-        
-        # List containing only the test repository
-        self.repo_links = [self.repo_url]
-        
-        # Initialize both repositories
-        # After cloning, checkout to HEAD~10 in the old repo
-        self.old_repo_path = Path(self.temp_dir_old) / "hellogitworld"
-
-        self.new_repo_path = Path(self.temp_dir_new) / "hellogitworld"
-        self.repo_file_new = Path(self.temp_dir_new) / "repos.json"
-        self.new_repo = GitRepo.clone_from(self.repo_url, self.new_repo_path)
-        repos_new = [Repo(path=str(self.new_repo_path))]
-        ta = TypeAdapter(list[Repo])
-        with open(Path(self.temp_dir_new) / "repos.json", "wb") as f:
-            f.write(ta.dump_json(repos_new))
+        self.remote_git_dir = tempfile.mkdtemp(prefix="remote")
+        self.local_git_dir = tempfile.mkdtemp(prefix="local")
+        # pdfs gets their own folder to make the check for identical folders work on local vs remote:
+        self.pdf_dir = tempfile.mkdtemp(prefix="pdf")
 
     def tearDown(self):
         # Remove temporary directories after the test
-        shutil.rmtree(self.temp_dir_old)
-        shutil.rmtree(self.temp_dir_new)
+        shutil.rmtree(self.remote_git_dir)
+        shutil.rmtree(self.local_git_dir)
+        shutil.rmtree(self.pdf_dir)
 
     def test_diff_and_apply(self):
+        # first create local repo and check if files are the same
+        repo_links = [
+            "https://github.com/githubtraining/hellogitworld.git",
+            "https://github.com/example-repo/lerna-example"
+        ]
+        remote_repos = Repos(base_path=self.remote_git_dir)
+        for repo_link in repo_links:
+            remote_repos.add_repo(repo_link=repo_link)
+        
+        remote_repos.checkout_all()
+        diff_data = remote_repos.create_diffs()
+        pdf_out_folder = Path(self.pdf_dir)
+        attach_to_pdfs(pdf_input_folder="tests/pdfs", pdf_output_folder=pdf_out_folder, data=diff_data)
+        
+        diff_data_pdf = recover_from_pdfs(pdf_out_folder)
+        assert(diff_data == diff_data_pdf)
+        local_repos = Repos(base_path=self.local_git_dir)
+        local_repos.apply_diffs(combined_diff=diff_data_pdf)
+        remote_repos.update_commit_hashes()
         self.assertTrue(
-            self.new_repo.active_branch.commit.hexsha == "ef7bebf8bdb1919d947afe46ab4b2fb4278039b3",
-            "It seems like the git pull didn't work properly"
-        )
-        
-        # Generate diffs based on the old repository state
-        diffs = get_diff(
-            repo_links=self.repo_links,
-            repo_file=str(self.repo_file_new)
-        )
-        
-        print("Applying diffs to the old repository...")
-        # Apply the diffs to the old repository
-        apply_diff(
-            diff=diffs,
-            root_folder=self.temp_dir_old
-        )
-        
-        self.assertTrue(
-            folders_identical(self.old_repo_path, self.new_repo_path),
+            folders_identical(self.local_git_dir, self.remote_git_dir),
             "After applying diffs, the old repository should match the new repository."
         )
-        
+
 
 if __name__ == "__main__":
     unittest.main()

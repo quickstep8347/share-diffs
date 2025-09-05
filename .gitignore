@@ -1,7 +1,8 @@
 # custom files:
 aider.txt
 private_key.pem
-
+uv.lock
+pdfs/*
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]

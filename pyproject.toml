@@ -1,23 +1,59 @@
-[tool.poetry]
+[project]
 name = "share-diffs"
-version = "0.1.0"
-description = ""
-authors = ["Joel Gotsch <joel.gotsch@gmail.com>"]
+version = "0.2.0"
+description = "A library that provides helper tools to sync repos with encryption in transit when github is not available."
+authors = [
+    { name = "Joel GOTSCH", email = "joel.gotsch@gmail.com" },
+]
 readme = "README.md"
+requires-python = ">=3.10,<4"
 packages = [{include = "share_diffs"}]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-cryptography = "^42.0.4"
-pydantic = "^2.10.6"
-gitpython = "^3.1.44"
 
 
-[tool.poetry.group.dev.dependencies]
-pytest = "^8.0.2"
-isort = "^5.13.2"
-black = "^24.2.0"
+dependencies = [
+    "cryptography>=42.0.4"
+    "pydantic>=2.10.6"
+    "gitpython>=3.1.44"
+]
+
+
+[dependency-groups]
+dev = [
+    "pytest>=7.2.0,<8",
+    "ruff>=0.8.2",
+    "uv>=0.5.8",
+]
 
 [build-system]
-requires = ["poetry-core"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+exclude = [".venv", "tests"]
+line-length = 120
+indent-width = 4
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["ALL"]
+extend-ignore = [
+    "D203",   # line before summary docs in module
+    "D213",   # line before summary docs in function
+    "G004",   # fstring in logs
+    "TRY003", # raise-vanilla-args, dont use long exception messages
+
+    # RULES RECOMMENDED TO IGNORE BY RUFF BECAUSE OF FORMATTER:
+    "COM812",
+    "ISC001",
+    "ERA001", # Ignore commented out code
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.pylint]
+max-args = 10
