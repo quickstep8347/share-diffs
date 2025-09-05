@@ -2,7 +2,7 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>QR Stream Receiver (LT fountain, diagnostics)</title>
+<title>QR Stream Receiver — strict (degree-from-frame)</title>
 <style>
   body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#111;color:#eee}
   header{padding:12px 16px;background:#222;position:sticky;top:0}
@@ -19,7 +19,7 @@
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 10px}
 </style>
 
-<header><b>QR Stream Receiver</b> — LT fountain (start anywhere) with diagnostics</header>
+<header><b>QR Stream Receiver</b> — strict (uses degree from frame)</header>
 <main>
   <div class="row">
     <!-- Camera -->
@@ -36,8 +36,6 @@
         <label class="small"><input type="checkbox" id="useCanvas"> Use offscreen canvas</label>
         <label class="small">Downscale <input id="downscale" type="range" min="1" max="4" value="1"></label>
         <label class="small"><input type="checkbox" id="drawBoxes" checked> Draw boxes</label>
-        <label class="small"><input type="checkbox" id="useTorch"> Torch</label>
-        <label class="small">Zoom <input id="zoom" type="range" min="1" max="1" step="0.1" value="1"></label>
       </div>
     </div>
 
@@ -66,6 +64,7 @@
       <div><b>Diagnostics</b></div>
       <div id="diag" class="small" style="white-space:pre-wrap;margin-top:6px"></div>
       <div id="last" class="small" style="white-space:pre-wrap;margin-top:8px"></div>
+      <div id="eqstats" class="small" style="white-space:pre-wrap;margin-top:8px"></div>
     </div>
   </div>
 </main>
@@ -81,46 +80,22 @@ function b64uToBytes(s){
   return ua;
 }
 
-/*** Tiny PRNG (must match Python) ***/
+/*** Tiny PRNG (match Python) ***/
 class XorShift32 {
   constructor(seed){ this.state = (seed>>>0) || 0xDEADBEEF }
   rand32(){
     let x = this.state>>>0;
-    x ^= (x << 13) >>> 0;
-    x ^= (x >>> 17) >>> 0;
-    x ^= (x << 5) >>> 0;
-    this.state = x>>>0;
-    return this.state>>>0;
+    x ^= (x << 13) >>> 0; x ^= (x >>> 17) >>> 0; x ^= (x << 5) >>> 0;
+    this.state = x>>>0; return this.state>>>0;
   }
   randint(a,b){ return a + (this.rand32() % (b - a + 1)) }
 }
 
-/*** Robust Soliton (same parameters as sender) ***/
-function robustSolitonCDF(K, c=0.1, delta=0.5){
-  let R = Math.max(1, Math.floor(c*Math.log(K/delta)*Math.sqrt(K)));
-  const tau = new Array(K+1).fill(0);
-  for (let d=1; d<K; d++){
-    if (1 <= d && d < Math.floor(K/R)) tau[d] = R/(d*K);
-    else if (d === Math.floor(K/R))   tau[d] = R*Math.log(R/delta)/K;
-  }
-  const rho = new Array(K+1).fill(0); rho[1] = 1.0/K;
-  for (let d=2; d<=K; d++) rho[d] = 1.0/(d*(d-1));
-  let Z = 0; for (let d=1; d<=K; d++) Z += rho[d] + tau[d];
-  const pmf = new Array(K+1).fill(0);
-  for (let d=1; d<=K; d++) pmf[d] = (rho[d] + tau[d]) / Z;
-  const cdf = [0.0]; let s = 0;
-  for (let d=1; d<=K; d++){ s += pmf[d]; cdf.push(s); }
-  cdf[cdf.length-1] = 1.0;
-  return cdf;
-}
-
-/*** Session + Decoder state ***/
+/*** Session + Decoder ***/
 let sess = {
-  sid:null, len:0, K:0, cs:0, fec_seed:0, cdf:null,
-  seen:new Set(),   // symbol ids seen
-  eqs:[],           // equations: {idxs:Set<int>, data:Uint8Array}
-  solved:new Map(), // chunkIndex -> Uint8Array
-  solvedCount:0
+  sid:null, len:0, K:0, cs:0, fec_seed:0,
+  seen:new Set(), eqs:[], solved:new Map(), solvedCount:0,
+  deg1Total:0
 };
 
 function resetSession(meta){
@@ -128,34 +103,25 @@ function resetSession(meta){
   sess.len = meta.len|0;
   sess.K   = meta.K|0;
   sess.cs  = meta.cs|0;
-  sess.fec_seed = u32(meta.r);           // FIX: keep unsigned
-  sess.cdf = robustSolitonCDF(sess.K);
-  sess.seen.clear(); sess.eqs.length=0; sess.solved.clear(); sess.solvedCount=0;
-  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, other:0 };
-  updateUI();
+  sess.fec_seed = u32(meta.r);     // unsigned seed
+  sess.seen.clear(); sess.eqs.length=0; sess.solved.clear(); sess.solvedCount=0; sess.deg1Total=0;
+  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, nod:0, other:0 };
+  updateUI(); updateEqStats();
 }
 
-/*** Reproduce chosen indices (must match Python) ***/
-function chosenIndices(symId){
+function chosenIndices(symId, d){
+  // REQUIRE d to be present
   const rng = new XorShift32(u32(sess.fec_seed ^ symId ^ (sess.K<<16)));
-  const cdf = sess.cdf;
-  // sample degree
-  const d = Math.max(1, Math.min(sess.K, (function sample(){
-    const u = (rng.rand32()>>>0) / 0x100000000;
-    let lo=1, hi=cdf.length-1;
-    while (lo<hi){ const mid=(lo+hi)>>1; (cdf[mid]>=u)?(hi=mid):(lo=mid+1); }
-    return lo;
-  })()));
-  // choose d distinct
+  const D = Math.max(1, Math.min(sess.K, d|0));
   const chosen = new Set();
-  while (chosen.size < d) chosen.add(rng.randint(0, sess.K-1));
-  return Array.from(chosen).sort((a,b)=>a-b);
+  while (chosen.size < D) chosen.add(rng.randint(0, sess.K-1));
+  return { idxs: Array.from(chosen).sort((a,b)=>a-b), d:D };
 }
 
-/*** Ingest & decode (peeling) ***/
-function ingestSymbol(symId, payload){
-  const idxs = chosenIndices(symId);
-  // reduce by known chunks
+function ingestSymbol(symId, payload, degree){
+  const sel = chosenIndices(symId, degree);
+  const idxs = sel.idxs;
+  if (idxs.length===1) sess.deg1Total++;
   const data = payload.slice();
   for (const k of Array.from(sess.solved.keys()).sort((a,b)=>a-b)){
     const pos = idxs.indexOf(k);
@@ -165,7 +131,7 @@ function ingestSymbol(symId, payload){
       idxs.splice(pos,1);
     }
   }
-  if (idxs.length===0) return; // nothing useful
+  if (idxs.length===0) return;
   sess.eqs.push({idxs:new Set(idxs), data});
   peel();
 }
@@ -180,7 +146,6 @@ function peel(){
         if (!sess.solved.has(k)){
           sess.solved.set(k, e.data);
           sess.solvedCount++;
-          // substitute into others
           for (const f of sess.eqs){
             if (f===e) continue;
             if (f.idxs.has(k)){
@@ -195,7 +160,7 @@ function peel(){
     }
     sess.eqs = sess.eqs.filter(e=>e.idxs.size>0);
   }
-  updateUI();
+  updateUI(); updateEqStats();
   if (sess.solvedCount >= sess.K) assembleAndEnableSave();
 }
 
@@ -206,18 +171,14 @@ function assembleAndEnableSave(){
     out.set(c, k*sess.cs);
   }
   const finalBytes = out.slice(0, sess.len);
-  const blob = new Blob([finalBytes], {type:"application/octet-stream"});
-  const url = URL.createObjectURL(blob);
+  const url = URL.createObjectURL(new Blob([finalBytes],{type:"application/octet-stream"}));
   const saveBtn = document.getElementById('saveBtn');
-  saveBtn.onclick = ()=>{
-    const a=document.createElement('a');
-    a.href=url; a.download=`qrstream_${sess.sid}.bin`; a.click();
-  };
+  saveBtn.onclick = ()=>{ const a=document.createElement('a'); a.href=url; a.download=`qrstream_${sess.sid}.bin`; a.click(); };
   saveBtn.disabled = false;
   msg(`✅ Reconstructed ${finalBytes.length} bytes. Save is enabled.`);
 }
 
-/*** UI & Diagnostics ***/
+/*** UI ***/
 function msg(s){ document.getElementById('msg').textContent = s; }
 function updateUI(){
   document.getElementById('sid').textContent = sess.sid || '–';
@@ -232,77 +193,52 @@ function updateUI(){
   const pct = sess.K ? Math.min(100, Math.floor((sess.solvedCount/sess.K)*100)) : 0;
   document.getElementById('bar').style.width = pct + '%';
 }
-
-const vEl = document.getElementById('video');
-const overlay = document.getElementById('overlay');
-const octx = overlay.getContext('2d', { willReadFrequently:true });
-const cameraSel = document.getElementById('cameraSel');
-const useCanvas = document.getElementById('useCanvas');
-const downscale = document.getElementById('downscale');
-const drawBoxes = document.getElementById('drawBoxes');
-const torchChk = document.getElementById('useTorch');
-const zoomRange = document.getElementById('zoom');
-
-function sizeOverlayToVideo(){
-  const rect = vEl.getBoundingClientRect();
-  overlay.width = rect.width; overlay.height = rect.height;
+function minEqDegree(){ let m=Infinity; for (const e of sess.eqs) m=Math.min(m,e.idxs.size); return m===Infinity?0:m; }
+function updateEqStats(){
+  document.getElementById('eqstats').textContent =
+`Equations: ${sess.eqs.length}, min degree in system: ${minEqDegree()}
+Total deg=1 seen (raw): ${sess.deg1Total}`;
 }
+
+/*** Camera + detector with diagnostics ***/
+const vEl = document.getElementById('video');
+const overlay = document.getElementById('overlay'); const octx = overlay.getContext('2d', {willReadFrequently:true});
+const cameraSel=document.getElementById('cameraSel'), useCanvas=document.getElementById('useCanvas');
+const downscale=document.getElementById('downscale'), drawBoxes=document.getElementById('drawBoxes');
+
+let running=false, detector=null, stream=null, rafId=null, deviceId=null;
+const off = document.createElement('canvas'); const offCtx=off.getContext('2d',{willReadFrequently:true});
+let detPerSec=0, accPerSec=0, lastLen=0, hadPrefix=false, lastErr="";
+let reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, nod:0, other:0 };
+
+function sizeOverlayToVideo(){ const r=vEl.getBoundingClientRect(); overlay.width=r.width; overlay.height=r.height; }
 function drawDetectionBoxes(codes){
   if (!drawBoxes.checked){ octx.clearRect(0,0,overlay.width,overlay.height); return; }
-  sizeOverlayToVideo();
-  octx.clearRect(0,0,overlay.width,overlay.height);
-  octx.lineWidth = 2; octx.strokeStyle = '#00e676';
-  const rw = vEl.videoWidth || 1, rh = vEl.videoHeight || 1;
+  sizeOverlayToVideo(); octx.clearRect(0,0,overlay.width,overlay.height);
+  octx.lineWidth=2; octx.strokeStyle='#00e676';
+  const rw=vEl.videoWidth||1, rh=vEl.videoHeight||1;
   for (const c of codes){
-    const pts = c.cornerPoints || [];
-    if (pts.length){
-      octx.beginPath();
-      for (let i=0;i<pts.length;i++){
-        const x = (pts[i].x / rw) * overlay.width;
-        const y = (pts[i].y / rh) * overlay.height;
-        if (i===0) octx.moveTo(x,y); else octx.lineTo(x,y);
-      }
-      octx.closePath(); octx.stroke();
-    }
+    const pts=c.cornerPoints||[]; if (!pts.length) continue;
+    octx.beginPath();
+    for (let i=0;i<pts.length;i++){
+      const x=(pts[i].x/rw)*overlay.width, y=(pts[i].y/rh)*overlay.height;
+      if (i===0) octx.moveTo(x,y); else octx.lineTo(x,y);
+    } octx.closePath(); octx.stroke();
   }
 }
-
-/*** Camera plumbing & advanced controls ***/
-let running=false, detector=null, stream=null, rafId=null, deviceId=null;
-const off = document.createElement('canvas'); const offCtx = off.getContext('2d', { willReadFrequently:true });
 
 async function listCameras(){
-  const devs = await navigator.mediaDevices.enumerateDevices();
-  cameraSel.innerHTML = "";
-  for (const d of devs){
-    if (d.kind==='videoinput'){
-      const opt = document.createElement('option');
-      opt.value = d.deviceId; opt.textContent = d.label || `Camera ${cameraSel.length+1}`;
-      cameraSel.appendChild(opt);
-    }
+  const devs=await navigator.mediaDevices.enumerateDevices();
+  cameraSel.innerHTML=""; for (const d of devs) if (d.kind==='videoinput'){
+    const opt=document.createElement('option'); opt.value=d.deviceId; opt.textContent=d.label||`Camera ${cameraSel.length+1}`; cameraSel.appendChild(opt);
   }
   if (!deviceId && cameraSel.options.length){
-    const envIdx = Array.from(cameraSel.options).findIndex(o => /back|rear|environment/i.test(o.textContent));
-    cameraSel.selectedIndex = envIdx >= 0 ? envIdx : 0;
-    deviceId = cameraSel.value;
+    const envIdx=Array.from(cameraSel.options).findIndex(o=>/back|rear|environment/i.test(o.textContent));
+    cameraSel.selectedIndex=envIdx>=0?envIdx:0; deviceId=cameraSel.value;
   }
 }
-cameraSel.onchange = ()=>{ deviceId=cameraSel.value; if (running){ stop(); start(); } };
+cameraSel.onchange=()=>{ deviceId=cameraSel.value; if (running){ stop(); start(); } };
 
-function applyAdvanced(track){
-  const caps = track.getCapabilities ? track.getCapabilities() : {};
-  if (caps.torch){ torchChk.disabled=false; torchChk.onchange=()=>track.applyConstraints({advanced:[{torch:torchChk.checked}]}).catch(()=>{}); }
-  else { torchChk.disabled=true; }
-  if (caps.zoom){
-    zoomRange.min=caps.zoom.min||1; zoomRange.max=caps.zoom.max||1; zoomRange.step=caps.zoom.step||0.1;
-    zoomRange.value = track.getSettings().zoom || zoomRange.min;
-    zoomRange.oninput=()=>track.applyConstraints({advanced:[{zoom:Number(zoomRange.value)}]}).catch(()=>{});
-  } else { zoomRange.min=zoomRange.max=1; zoomRange.value=1; }
-}
-
-/*** Per-second stats & reasons ***/
-let detPerSec=0, accPerSec=0, lastLen=0, hadPrefix=false, lastErr="";
-let reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, other:0 };
 setInterval(()=>{
   const track = stream ? stream.getVideoTracks()[0] : null;
   const st = track ? track.getSettings() : {};
@@ -310,25 +246,20 @@ setInterval(()=>{
 `Detections/s: ${detPerSec}   Accepted/s: ${accPerSec}
 Last raw length: ${lastLen}   QS1 prefix: ${hadPrefix}
 Video: ${vEl.videoWidth||0}x${vEl.videoHeight||0}  fps(set): ${st.frameRate||'?'}
-Reasons (per s): ${JSON.stringify(reasons)}`;
-  detPerSec=0; accPerSec=0; reasons={ sid:0, K:0, cs:0, r:0, dup:0, parse:0, other:0 };
+Reasons (per s): ${JSON.stringify(reasons)}  Last error: ${lastErr || '—'}`;
+  detPerSec=0; accPerSec=0; reasons={ sid:0, K:0, cs:0, r:0, dup:0, parse:0, nod:0, other:0 };
 }, 1000);
 
 function showBasics(){
-  const hasBD = ('BarcodeDetector' in window);
-  const hasGUM = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
-  const secure = window.isSecureContext;
-  const proto = location.protocol;
-  const origin = location.origin || location.href;
+  const hasBD=('BarcodeDetector' in window), hasGUM=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia), secure=window.isSecureContext;
   document.getElementById('diag').textContent =
 `BarcodeDetector: ${hasBD}
 getUserMedia: ${hasGUM}
-isSecureContext: ${secure} (protocol=${proto})
-origin: ${origin}`;
+isSecureContext: ${secure} (protocol=${location.protocol})
+origin: ${location.origin || location.href}`;
 }
 showBasics();
 
-/*** Start/Stop/Loop ***/
 document.getElementById('startBtn').onclick = start;
 document.getElementById('stopBtn').onclick  = stop;
 
@@ -337,64 +268,51 @@ async function start(){
   detector = new BarcodeDetector({formats:['qr_code']});
   await listCameras();
   try{
-    const constraints = {
-      video: deviceId ? {deviceId:{exact:deviceId}} : {facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}},
-      audio:false
-    };
+    const constraints = { video: deviceId ? {deviceId:{exact:deviceId}} : {facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}}, audio:false };
     stream = await navigator.mediaDevices.getUserMedia(constraints);
     vEl.srcObject = stream; await vEl.play();
-    const track = stream.getVideoTracks()[0];
-    applyAdvanced(track);
-  }catch(e){
-    msg('getUserMedia error: ' + (e && e.name ? e.name : e)); return;
-  }
-  running=true;
-  document.getElementById('startBtn').disabled=true;
-  document.getElementById('stopBtn').disabled=false;
+  }catch(e){ msg('getUserMedia error: ' + (e && e.name ? e.name : e)); return; }
+  running=true; document.getElementById('startBtn').disabled=true; document.getElementById('stopBtn').disabled=false;
   requestAnimationFrame(loop);
 }
 
 function stop(){
-  running=false;
-  if (rafId) cancelAnimationFrame(rafId);
+  running=false; if (rafId) cancelAnimationFrame(rafId);
   if (stream){ for (const t of stream.getTracks()) t.stop(); stream=null; }
-  document.getElementById('startBtn').disabled=false;
-  document.getElementById('stopBtn').disabled=true;
+  document.getElementById('startBtn').disabled=false; document.getElementById('stopBtn').disabled=true;
   octx.clearRect(0,0,overlay.width,overlay.height);
 }
 
 function updateLastFrameDiag(frame, accepted, why){
   const rHex = frame && (u32(frame.r)).toString(16).padStart(8,'0');
   const sHex = sess.fec_seed ? (sess.fec_seed).toString(16).padStart(8,'0') : '--------';
+  const dShow = frame && frame.d;
   document.getElementById('last').textContent =
 `Last frame:
   sid match: ${frame && (frame.sid===sess.sid)}
   K   match: ${frame && (frame.K===sess.K)}
   cs  match: ${frame && (frame.cs===sess.cs)}
   r   match: ${frame && (u32(frame.r)===sess.fec_seed)}   (frame.r=0x${rHex}, sess.fec_seed=0x${sHex})
+  d (degree): ${dShow}
   symId: ${frame ? frame.i : '–'}   accepted: ${accepted}   reason: ${why||'-'}`;
 }
 
 async function loop(){
   if (!running) return;
-  sizeOverlayToVideo();
-  let codes = [];
+  let codes=[]; sizeOverlayToVideo();
   try{
     codes = await detector.detect(vEl);
-    if (!codes.length && document.getElementById('useCanvas').checked){
-      // downscale and try again
-      const ds = Math.max(1, Number(document.getElementById('downscale').value));
-      const w = vEl.videoWidth || 640, h = vEl.videoHeight || 480;
-      off.width = Math.floor(w/ds); off.height = Math.floor(h/ds);
-      offCtx.imageSmoothingEnabled = false;
-      offCtx.drawImage(vEl, 0, 0, off.width, off.height);
+    if (!codes.length && useCanvas.checked){
+      const ds=Math.max(1,Number(downscale.value));
+      const w=vEl.videoWidth||640, h=vEl.videoHeight||480;
+      off.width=Math.floor(w/ds); off.height=Math.floor(h/ds);
+      offCtx.imageSmoothingEnabled=false; offCtx.drawImage(vEl,0,0,off.width,off.height);
       codes = await detector.detect(off);
     }
   }catch(e){ lastErr = e.message || String(e); }
 
   if (codes && codes.length){
-    detPerSec += codes.length;
-    drawDetectionBoxes(codes);
+    detPerSec += codes.length; drawDetectionBoxes(codes);
     for (const code of codes){
       const raw = code.rawValue || '';
       lastLen = raw.length; hadPrefix = raw.startsWith('QS1|');
@@ -403,32 +321,29 @@ async function loop(){
       try{ frame = JSON.parse(raw.slice(4)); }
       catch(_){ reasons.parse++; updateLastFrameDiag(null,false,'parse'); continue; }
 
-      // New session?
       if (!sess.sid || sess.sid !== frame.sid) resetSession(frame);
 
-      // Gating with UNSIGNED seed comparison
       const okSid = frame.sid===sess.sid;
       const okK   = frame.K===sess.K;
       const okCs  = frame.cs===sess.cs;
       const okR   = u32(frame.r)===sess.fec_seed;
+      const okD   = (typeof frame.d==='number') && frame.d>=1 && frame.d<=sess.K;
 
-      if (!(okSid && okK && okCs && okR)){
-        if (!okSid) reasons.sid++; else if (!okK) reasons.K++; else if (!okCs) reasons.cs++; else if (!okR) reasons.r++; else reasons.other++;
-        updateLastFrameDiag(frame,false, !okSid?'sid':!okK?'K':!okCs?'cs':'r');
+      if (!(okSid && okK && okCs && okR && okD)){
+        if (!okSid) reasons.sid++; else if (!okK) reasons.K++; else if (!okCs) reasons.cs++; else if (!okR) reasons.r++; else if (!okD) reasons.nod++; else reasons.other++;
+        updateLastFrameDiag(frame,false, !okSid?'sid':!okK?'K':!okCs?'cs':!okR?'r':'d');
         continue;
       }
 
       if (sess.seen.has(frame.i)){ reasons.dup++; updateLastFrameDiag(frame,false,'dup'); continue; }
 
-      // Accept symbol
-      sess.seen.add(frame.i);
-      accPerSec++;
+      // Accept
+      sess.seen.add(frame.i); accPerSec++;
       const payload = b64uToBytes(frame.p);
-      ingestSymbol(frame.i, payload);
-      updateUI();
-      updateLastFrameDiag(frame,true,'ok');
+      ingestSymbol(frame.i, payload, frame.d);
+      updateUI(); updateLastFrameDiag(frame,true,'ok');
     }
-  }else{
+  } else {
     drawDetectionBoxes([]);
   }
   rafId = requestAnimationFrame(loop);
