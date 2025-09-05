@@ -48,6 +48,19 @@
       <div id="msg" class="small" style="margin-top:10px;white-space:pre-wrap"></div>
     </div>
   </div>
+  <div class="card" style="margin-top:12px">
+    <div><b>Diagnostics</b></div>
+    <div class="small" id="diag" style="white-space:pre-wrap"></div>
+  </div>
+  <script>
+  (() => {
+    const diag = document.getElementById('diag');
+    diag.textContent =
+      `BarcodeDetector: ${'BarcodeDetector' in window}\n` +
+      `mediaDevices/getUserMedia: ${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}\n` +
+      `isSecureContext: ${window.isSecureContext} (protocol=${location.protocol}, origin=${location.origin || location.href})`;
+  })();
+  </script>
 </main>
 
 <script>
