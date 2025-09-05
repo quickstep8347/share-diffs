@@ -64,6 +64,12 @@
 </main>
 
 <script>
+let _seenInLastSec = 0, _lastLen = 0, _hasPrefix = false;
+setInterval(() => {
+  document.getElementById('msg').textContent =
+    `Detections/s: ${_seenInLastSec}  | lastLen: ${_lastLen}  | QS1 prefix: ${_hasPrefix}`;
+  _seenInLastSec = 0;
+}, 1000);
 /* ---------- small base64url helpers ---------- */
 function b64uToBytes(s){
   const pad = "=".repeat((4 - (s.length % 4)) % 4);
@@ -277,6 +283,12 @@ async function loop(){
   try{
     const codes = await detector.detect(v);
     for (const code of codes){
+        if (codes && codes.length) {
+            _seenInLastSec += codes.length;
+            const raw = codes[0].rawValue || '';
+            _lastLen = raw.length;
+            _hasPrefix = raw.startsWith('QS1|');
+        }
       const raw = code.rawValue || '';
       if (typeof raw === 'string' && raw.startsWith('QS1|')){
         try{
