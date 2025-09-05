@@ -1,28 +1,31 @@
 #!/usr/bin/env python3
-"""Create an animated GIF of QR frames for looped playback.
+# -*- coding: utf-8 -*-
+"""
+Generate a self-contained QR streaming website for air-gapped transfer.
 
-- Reads a bytes object (demo at bottom) -> builds fountain-coded frames
-- Renders each frame as a black/white QR
-- Saves an animated GIF with controlled frame duration and infinite loop
-- Emits a minimal HTML file that displays the GIF without blurring
+- Minimal deps: only 'qrcode' (pure Python). NO Pillow, NO ffmpeg.
+- Outputs:
+    out_dir/
+      index.html           # player (FPS slider, play/pause)
+      frames/              # SVG QR frames (vector, crisp)
+        frame_0001.svg
+        frame_0002.svg
+        ...
+      manifest.json        # basic metadata
 
-Notes:
-- Keep a modest number of frames per loop (e.g., ~K*(1+ε)). Very large loops produce huge GIFs.
-- GIF palette is forced to 2 colors (no dithering) to preserve crisp modules.
+Receiver: use the HTML reader page we built earlier (BarcodeDetector) to scan the loop.
 """
 
-import base64
-import hashlib
-import json
-import math
-import os
+import os, json, math, base64, hashlib, pathlib
+from typing import List, Tuple
 
 import qrcode
-from PIL import Image
-from qrcode.constants import ERROR_CORRECT_H, ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q
+from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q, ERROR_CORRECT_H
+from qrcode.image.svg import SvgPathImage  # no Pillow required
+
+# ----------------- tiny helpers -----------------
 
 
-# --------- tiny helpers ----------
 def b64u(b: bytes) -> str:
     return base64.urlsafe_b64encode(b).decode("ascii").rstrip("=")
 
@@ -31,7 +34,9 @@ def sha256_hex(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
 
-# --------- LT fountain (encoder only) ----------
+# ----------------- LT fountain (encoder only) -----------------
+
+
 class XorShift32:
     def __init__(self, seed: int):
         self.state = (seed or 0xDEADBEEF) & 0xFFFFFFFF
@@ -48,13 +53,13 @@ class XorShift32:
         return a + (self.rand32() % (b - a + 1))
 
 
-def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.5) -> list[float]:
+def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.5) -> List[float]:
     R = max(1, int(c * math.log(K / delta) * math.sqrt(K)))
     tau = [0.0] * (K + 1)
     for d in range(1, K):
-        if 1 <= d < K // R:
+        if 1 <= d < max(1, K // R):
             tau[d] = R / (d * K)
-        elif d == K // R:
+        elif d == max(1, K // R):
             tau[d] = R * math.log(R / delta) / K
     rho = [0.0] * (K + 1)
     rho[1] = 1.0 / K
@@ -71,7 +76,7 @@ def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.5) -> list[float
     return cdf
 
 
-def sample_degree(cdf: list[float], rng: XorShift32) -> int:
+def sample_degree(cdf: List[float], rng: XorShift32) -> int:
     u = (rng.rand32() & 0xFFFFFFFF) / 0x100000000
     lo, hi = 1, len(cdf) - 1
     while lo < hi:
@@ -83,7 +88,7 @@ def sample_degree(cdf: list[float], rng: XorShift32) -> int:
     return lo
 
 
-def lt_encode_symbol(chunks: list[bytes], sym_id: int, fec_seed: int, cdf: list[float]) -> bytes:
+def lt_encode_symbol(chunks: List[bytes], sym_id: int, fec_seed: int, cdf: List[float]) -> bytes:
     K = len(chunks)
     rng = XorShift32((fec_seed ^ sym_id ^ (K << 16)) & 0xFFFFFFFF)
     d = max(1, min(K, sample_degree(cdf, rng)))
@@ -99,140 +104,278 @@ def lt_encode_symbol(chunks: list[bytes], sym_id: int, fec_seed: int, cdf: list[
     return bytes(out)
 
 
-# --------- Build frames (metadata + payload) ----------
-def build_frames(data: bytes, chunk_size: int = 512, overhead: float = 0.12) -> tuple[list[dict], str]:
+# ----------------- Frames -----------------
+
+
+def build_frames(data: bytes, chunk_size: int, overhead: float):
     total_len = len(data)
+    # chunk & pad
     chunks = [bytearray(data[i : i + chunk_size]) for i in range(0, total_len, chunk_size)]
     if not chunks:
         chunks = [bytearray([0])]
-    max_len = max(len(c) for c in chunks)
+    cs = max(len(c) for c in chunks)
     for c in chunks:
-        if len(c) < max_len:
-            c.extend(b"\x00" * (max_len - len(c)))
+        if len(c) < cs:
+            c.extend(b"\x00" * (cs - len(c)))
     chunks = [bytes(c) for c in chunks]
     K = len(chunks)
+
+    import os
+
     fec_seed = int.from_bytes(os.urandom(4), "big")
-    session_id = os.urandom(8)
-    sid_b64 = b64u(session_id)
+    sid = os.urandom(8)
+    sid_b64 = b64u(sid)
     cdf = robust_soliton_cdf(K)
-    N = int(math.ceil(K * (1.0 + overhead)))
+
+    N = int(math.ceil(K * (1.0 + overhead)))  # frames per loop
     frames = []
     for sym in range(N):
         payload = lt_encode_symbol(chunks, sym, fec_seed, cdf)
-        frames.append(
-            {
-                "v": 1,
-                "sid": sid_b64,
-                "len": total_len,
-                "K": K,
-                "cs": max_len,
-                "i": sym,
-                "r": fec_seed,
-                "p": b64u(payload),
-                "x": b64u(os.urandom(2)),
-            }
-        )
-    return frames, sha256_hex(data)
+        frame = {
+            "v": 1,
+            "sid": sid_b64,
+            "len": total_len,
+            "K": K,
+            "cs": cs,
+            "i": sym,
+            "r": fec_seed,
+            "p": b64u(payload),
+            "x": b64u(os.urandom(2)),
+        }
+        frames.append(frame)
+    return frames
 
 
-# --------- QR rendering helpers ----------
-def make_qr_image(text: str, version: int = 15, ecc: str = "M", box_size: int = 10, border: int = 4) -> Image.Image:
-    ec_map = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q, "H": ERROR_CORRECT_H}
+# ----------------- QR (SVG) rendering -----------------
+
+_ECC_MAP = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q, "H": ERROR_CORRECT_H}
+
+
+def save_qr_svg(text: str, path: str, ecc: str = "M", version: int | None = None):
+    """
+    Render a QR as SVG (no Pillow). 'version=None' lets library auto-pick 1..40.
+    """
     qr = qrcode.QRCode(
-        version=version,
-        error_correction=ec_map.get(ecc, ERROR_CORRECT_M),
-        box_size=box_size,
-        border=border,
+        version=version if version else None,
+        error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
+        box_size=10,  # scale doesn't affect SVG much; viewBox will scale
+        border=4,
     )
     qr.add_data(text)
-    qr.make(fit=False)
-    img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-    return img
+    qr.make(fit=True)
+    img = qr.make_image(image_factory=SvgPathImage)
+    img.save(path)
 
 
-def force_bw_palette(im: Image.Image) -> Image.Image:
-    """
-    Convert to a strict 2-color palette (black/white), no dithering.
-    This avoids GIF dithering artifacts that can confuse QR scanners.
-    """
-    # Create a 2-color paletted image
-    pal = Image.new("P", (1, 1))
-    # palette: index 0 = black, index 1 = white
-    palette = [0, 0, 0, 255, 255, 255] + [0, 0, 0] * 254
-    pal.putpalette(palette)
-    bw = im.convert("1")  # pure B/W threshold
-    pal_im = bw.convert("P", dither=Image.NONE)
-    pal_im.putpalette(palette)
-    return pal_im
+# ----------------- HTML player -----------------
 
-
-# --------- Main: build GIF + simple HTML ----------
-def main():
-    # 1) Your bytes here (or read from file)
-    data = b"Hello QR stream over GIF! " * 200  # ~5 KB demo; replace as needed
-    # params
-    CHUNK = 512
-    OVERHEAD = 0.12  # ~12% extra symbols per loop
-    VERSION = 15  # QR version (10..18 good starting range)
-    ECC = "M"  # L/M/Q/H
-    WINDOW_PX = 900  # output dimensions (square)
-    FPS = 5.0  # frame rate (1 frame every 200 ms)
-    GIF_PATH = "qr_stream.gif"
-    HTML_PATH = "qr_stream_player.html"
-
-    # 2) Build fountain frames
-    frames, file_hash = build_frames(data, chunk_size=CHUNK, overhead=OVERHEAD)
-    frame_texts = ["QS1|" + json.dumps(fr, separators=(",", ":")) for fr in frames]
-
-    # 3) Render QR images
-    imgs: list[Image.Image] = []
-    # Scale factor: ensure integer scaling to avoid interpolation
-    box_size = max(2, WINDOW_PX // (4 * VERSION))
-    for t in frame_texts:
-        im = make_qr_image(t, version=VERSION, ecc=ECC, box_size=box_size, border=4)
-        im = im.resize((WINDOW_PX, WINDOW_PX), Image.NEAREST)  # keep crisp modules
-        im = force_bw_palette(im)  # strict 2-color palette, no dithering
-        imgs.append(im)
-
-    # 4) Save animated GIF (loop forever, per-frame duration in ms)
-    duration_ms = int(1000 / FPS)
-    # All frames must be mode "P" with identical palette; ensured by force_bw_palette.
-    first, rest = imgs[0], imgs[1:] if len(imgs) > 1 else []
-    first.save(
-        GIF_PATH,
-        save_all=True,
-        append_images=rest,
-        loop=0,  # 0 = infinite loop
-        duration=duration_ms,  # per-frame delay
-        disposal=2,  # restore to background between frames
-    )
-    print(f"[gif] wrote {GIF_PATH} with {len(imgs)} frames @ ~{FPS} FPS")
-    print(f"[gif] file_sha256={file_hash}")
-    est_payload_per_frame = (VERSION, ECC)  # for your own bookkeeping if desired
-
-    # 5) Emit a minimal HTML page that displays the GIF without blurring
-    html = f"""<!doctype html>
+_HTML_TEMPLATE = """<!doctype html>
 <html lang="en">
-<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>QR Stream GIF Player</title>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
 <style>
-  body {{ margin:0; background:#111; color:#eee; font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif; }}
-  main {{ display:flex; align-items:center; justify-content:center; min-height:100vh; flex-direction:column; gap:12px; }}
-  img.qr {{ width: min(92vmin, 900px); height: auto; image-rendering: pixelated; image-rendering: crisp-edges; }}
-  .info {{ opacity:.8; font-size:.9em; }}
+  :root{{color-scheme:dark light}}
+  body{{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#111;color:#eee}}
+  header{{padding:12px 16px;background:#222;position:sticky;top:0}}
+  main{{padding:16px}}
+  .row{{display:flex;gap:16px;flex-wrap:wrap}}
+  .card{{background:#1b1b1b;border-radius:12px;padding:12px}}
+  img.qr{{width:min(92vmin, {max_px}px);height:auto;image-rendering:pixelated;image-rendering:crisp-edges;background:#fff;border-radius:12px}}
+  input[type=range]{{width:220px}}
+  button{{background:#4caf50;border:none;color:#fff;border-radius:8px;padding:8px 12px;font-weight:600;cursor:pointer}}
+  button.secondary{{background:#333}}
+  button[disabled]{{opacity:.5;cursor:not-allowed}}
+  .small{{opacity:.85;font-size:.9em}}
 </style>
+<header><b>{title}</b></header>
 <main>
-  <img class="qr" src="{GIF_PATH}" alt="QR stream animation" />
-  <div class="info">
-    QR stream (v={VERSION}, ECC={ECC}, fps={FPS:g}) — looped. Keep the phone steady and fill the frame.
+  <div class="row">
+    <div class="card" style="flex:1;min-width:300px">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+        <button id="playBtn">▶ Play</button>
+        <button id="pauseBtn" class="secondary" disabled>⏸ Pause</button>
+        <button id="prevBtn" class="secondary">⟲ Prev</button>
+        <button id="nextBtn" class="secondary">Next ⟶</button>
+        <label class="small" for="fps">FPS</label>
+        <input id="fps" type="range" min="1" max="15" step="1" value="{fps_default}">
+        <span id="fpsVal" class="small">{fps_default}</span>
+      </div>
+      <div style="margin-top:10px;display:flex;justify-content:center">
+        <img id="qr" class="qr" src="frames/{first_name}" alt="QR frame">
+      </div>
+      <div class="small" style="margin-top:10px" id="info"></div>
+    </div>
+    <div class="card" style="flex:1;min-width:260px">
+      <div><b>Session</b></div>
+      <div class="small">sid: <code id="sid"></code></div>
+      <div class="small">len: <span id="len"></span> bytes</div>
+      <div class="small">K / cs: <span id="K"></span> / <span id="cs"></span></div>
+      <div class="small">Frames per loop: <span id="N"></span></div>
+      <div class="small">SHA-256 (file): <code id="sha"></code></div>
+      <div class="small">Tip: open the <i>receiver</i> page via https or http://localhost so the camera works.</div>
+    </div>
   </div>
 </main>
+<script>
+const MANIFEST = {manifest_json};
+const pad = n => String(n).padStart({pad_width}, '0');
+const img = document.getElementById('qr');
+const info = document.getElementById('info');
+const sidEl = document.getElementById('sid');
+const lenEl = document.getElementById('len');
+const KEl = document.getElementById('K');
+const csEl = document.getElementById('cs');
+const NEl = document.getElementById('N');
+const shaEl = document.getElementById('sha');
+const playBtn = document.getElementById('playBtn');
+const pauseBtn = document.getElementById('pauseBtn');
+const prevBtn = document.getElementById('prevBtn');
+const nextBtn = document.getElementById('nextBtn');
+const fpsSlider = document.getElementById('fps');
+const fpsVal = document.getElementById('fpsVal');
+
+let idx = 0, running = false, lastTime = 0, acc = 0;
+let fps = Number(fpsSlider.value);
+
+// ESCAPED: ${{...}} so Python .format won't eat the JS template braces
+function frameName(i){{ return `frame_${{pad(i+1)}}.svg`; }}
+
+function setFrame(i){{
+  idx = (i + MANIFEST.N) % MANIFEST.N;
+  img.src = `frames/${{frameName(idx)}}`;
+  info.textContent = `Frame ${{idx+1}} / ${{MANIFEST.N}}`;
+}}
+
+function start(){{
+  if (running) return;
+  running = true;
+  playBtn.disabled = true;
+  pauseBtn.disabled = false;
+  lastTime = performance.now();
+  acc = 0;
+  requestAnimationFrame(tick);
+}}
+function pause(){{
+  running = false;
+  playBtn.disabled = false;
+  pauseBtn.disabled = true;
+}}
+function tick(now){{
+  if (!running) return;
+  const dt = now - lastTime; lastTime = now;
+  acc += dt;
+  const interval = 1000 / fps;
+  while (acc >= interval){{
+    acc -= interval;
+    setFrame(idx + 1);
+  }}
+  requestAnimationFrame(tick);
+}}
+
+// UI wiring
+playBtn.onclick = start;
+pauseBtn.onclick = pause;
+prevBtn.onclick = () => setFrame(idx - 1);
+nextBtn.onclick = () => setFrame(idx + 1);
+fpsSlider.oninput = () => {{ fps = Number(fpsSlider.value); fpsVal.textContent = fps; }};
+
+// Show meta
+sidEl.textContent = MANIFEST.sid;
+lenEl.textContent = MANIFEST.len;
+KEl.textContent = MANIFEST.K;
+csEl.textContent = MANIFEST.cs;
+NEl.textContent = MANIFEST.N;
+shaEl.textContent = MANIFEST.sha256;
+
+// Initial
+setFrame(0);
+</script>
 </html>
 """
-    with open(HTML_PATH, "w", encoding="utf-8") as f:
-        f.write(html)
-    print(f"[html] wrote {HTML_PATH}")
 
+
+# ----------------- top-level convenience -----------------
+
+
+def generate_qr_site(
+    data: bytes,
+    out_dir: str,
+    *,
+    chunk_size: int = 512,
+    overhead: float = 0.12,
+    ecc: str = "M",
+    version: int | None = None,  # 1..40 or None=auto
+    fps_default: int = 5,
+    title: str = "QR Stream Sender",
+) -> str:
+    """
+    Build frames + website into out_dir. Returns path to index.html.
+    """
+    out = pathlib.Path(out_dir)
+    frames_dir = out / "frames"
+    frames_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build frames and compute file hash for display
+    frames = build_frames(data, chunk_size=chunk_size, overhead=overhead)
+    # Use the first frame for manifest meta
+    meta = frames[0]
+    file_hash = sha256_hex(data)
+
+    # Render SVG frames
+    N = len(frames)
+    pad_width = max(4, len(str(N)))
+    for i, fr in enumerate(frames, 1):
+        txt = "QS1|" + json.dumps(fr, separators=(",", ":"))
+        fname = f"frame_{str(i).zfill(pad_width)}.svg"
+        save_qr_svg(txt, str(frames_dir / fname), ecc=ecc, version=version)
+
+    # Write manifest
+    manifest = {
+        "sid": meta["sid"],
+        "len": meta["len"],
+        "K": meta["K"],
+        "cs": meta["cs"],
+        "N": N,
+        "ecc": ecc,
+        "version": version or "auto",
+        "sha256": file_hash,
+    }
+    (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+    # Write HTML player
+    first_name = f"frame_{str(1).zfill(pad_width)}.svg"
+    html = _HTML_TEMPLATE.format(
+        title=title,
+        max_px=900,
+        fps_default=fps_default,
+        first_name=first_name,
+        pad_width=pad_width,
+        manifest_json=json.dumps(manifest, separators=(",", ":")),
+    )
+    index_path = out / "index.html"
+    index_path.write_text(html, encoding="utf-8")
+    print(f"Serve it with:    python -m http.server -d {out} 8000")
+    print("Then open:        http://localhost:8000")
+
+    return str(index_path)
+
+
+# ----------------- example CLI -----------------
 
 if __name__ == "__main__":
-    main()
+    # DEMO: replace with your own bytes (or read a file)
+    payload = b"Hello QR stream over SVG frames! " * 400  # ~13 KB example
+    out_path = generate_qr_site(
+        payload,
+        out_dir="qr_site_out2",
+        chunk_size=256,
+        overhead=0.12,
+        ecc="L",
+        version=18,  # let the lib choose the needed QR version
+        fps_default=5,
+        title="QR Stream Sender",
+    )
+    # print(f"Site written to: {out_path}")
+    # print("Serve it with:   python -m http.server -d qr_site_out 8000")
+    # print("Open:            http://localhost:8000")

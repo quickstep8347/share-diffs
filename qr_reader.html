@@ -2,85 +2,88 @@
 <html lang="en">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>QR Stream Receiver (LT fountain)</title>
+<title>QR Stream Receiver (LT fountain, diagnostics)</title>
 <style>
-  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;padding:0;background:#111;color:#eee}
+  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:#111;color:#eee}
   header{padding:12px 16px;background:#222;position:sticky;top:0}
   main{padding:16px}
   .row{display:flex;gap:16px;flex-wrap:wrap}
-  video{width:100%;max-width:480px;background:#000;border-radius:12px}
   .card{background:#1b1b1b;border-radius:12px;padding:12px}
-  .progress{height:12px;background:#333;border-radius:6px;overflow:hidden}
-  .bar{height:100%;width:0;background:#4caf50}
-  code{background:#222;padding:2px 6px;border-radius:6px}
-  button{background:#4caf50;border:none;color:#fff;border-radius:8px;padding:10px 14px;font-weight:600;cursor:pointer}
+  button{background:#4caf50;border:none;color:#fff;border-radius:8px;padding:8px 12px;font-weight:600;cursor:pointer}
+  button.secondary{background:#333}
   button[disabled]{opacity:.5;cursor:not-allowed}
-  label{display:block;margin:6px 0 4px}
-  .small{opacity:.8;font-size:.9em}
+  .small{opacity:.85;font-size:.9em}
+  video{width:100%;max-width:520px;background:#000;border-radius:12px}
+  canvas#overlay{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
+  code{background:#222;padding:2px 6px;border-radius:6px}
+  .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 10px}
 </style>
-<header>
-  <strong>QR Stream Receiver</strong> — LT fountain, arbitrary start, loss tolerant
-</header>
+
+<header><b>QR Stream Receiver</b> — LT fountain (start anywhere) with diagnostics</header>
 <main>
   <div class="row">
-    <div class="card" style="flex:1;min-width:300px">
-      <label>Camera</label>
-      <video id="video" autoplay playsinline></video>
-      <div class="small" id="camInfo"></div>
-      <div style="margin-top:8px">
+    <!-- Camera -->
+    <div class="card" style="flex:1;min-width:320px">
+      <div style="position:relative">
+        <video id="video" autoplay playsinline></video>
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="small" id="camInfo" style="white-space:pre-wrap;margin-top:6px">–</div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px">
         <button id="startBtn">Start</button>
-        <button id="stopBtn" disabled>Stop</button>
+        <button id="stopBtn" class="secondary" disabled>Stop</button>
+        <select id="cameraSel"></select>
+        <label class="small"><input type="checkbox" id="useCanvas"> Use offscreen canvas</label>
+        <label class="small">Downscale <input id="downscale" type="range" min="1" max="4" value="1"></label>
+        <label class="small"><input type="checkbox" id="drawBoxes" checked> Draw boxes</label>
+        <label class="small"><input type="checkbox" id="useTorch"> Torch</label>
+        <label class="small">Zoom <input id="zoom" type="range" min="1" max="1" step="0.1" value="1"></label>
       </div>
     </div>
-    <div class="card" style="flex:1;min-width:280px">
+
+    <!-- Status -->
+    <div class="card" style="flex:1;min-width:300px">
       <div><b>Status</b></div>
-      <div class="small">Session: <code id="sid">–</code></div>
-      <div class="small">Symbols: <span id="symCount">0</span> / <span id="need">?</span> (unique)</div>
-      <div class="progress" style="margin:8px 0 10px">
-        <div class="bar" id="bar"></div>
+      <div class="kv small" style="margin-top:6px">
+        <div>Session:</div>         <div><code id="sid">–</code></div>
+        <div>Symbols:</div>         <div><span id="symCount">0</span> / <span id="need">?</span> (unique)</div>
+        <div>K (chunks):</div>      <div><span id="K">?</span>, chunk: <span id="cs">?</span> B</div>
+        <div>Total bytes:</div>     <div><span id="tot">?</span></div>
+        <div>Recovered:</div>       <div><span id="rec">0</span> / <span id="K2">?</span></div>
       </div>
-      <div class="small">K (chunks): <span id="K">?</span>, chunk: <span id="cs">?</span> B</div>
-      <div class="small">Total bytes: <span id="tot">?</span></div>
-      <div class="small">Recovered: <span id="rec">0</span> / <span id="K2">?</span></div>
+      <div class="small" style="margin-top:8px">Progress</div>
+      <div style="height:12px;background:#333;border-radius:6px;overflow:hidden;margin:4px 0 2px">
+        <div id="bar" style="height:100%;width:0;background:#4caf50"></div>
+      </div>
       <div style="margin-top:10px">
         <button id="saveBtn" disabled>Save File</button>
       </div>
       <div id="msg" class="small" style="margin-top:10px;white-space:pre-wrap"></div>
     </div>
+
+    <!-- Diagnostics -->
+    <div class="card" style="flex:1;min-width:320px">
+      <div><b>Diagnostics</b></div>
+      <div id="diag" class="small" style="white-space:pre-wrap;margin-top:6px"></div>
+      <div id="last" class="small" style="white-space:pre-wrap;margin-top:8px"></div>
+    </div>
   </div>
-  <div class="card" style="margin-top:12px">
-    <div><b>Diagnostics</b></div>
-    <div class="small" id="diag" style="white-space:pre-wrap"></div>
-  </div>
-  <script>
-  (() => {
-    const diag = document.getElementById('diag');
-    diag.textContent =
-      `BarcodeDetector: ${'BarcodeDetector' in window}\n` +
-      `mediaDevices/getUserMedia: ${!!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)}\n` +
-      `isSecureContext: ${window.isSecureContext} (protocol=${location.protocol}, origin=${location.origin || location.href})`;
-  })();
-  </script>
 </main>
 
 <script>
-let _seenInLastSec = 0, _lastLen = 0, _hasPrefix = false;
-setInterval(() => {
-  document.getElementById('msg').textContent =
-    `Detections/s: ${_seenInLastSec}  | lastLen: ${_lastLen}  | QS1 prefix: ${_hasPrefix}`;
-  _seenInLastSec = 0;
-}, 1000);
-/* ---------- small base64url helpers ---------- */
+/*** Helpers ***/
+const u32 = n => (n >>> 0);
 function b64uToBytes(s){
   const pad = "=".repeat((4 - (s.length % 4)) % 4);
-  const b = atob((s + pad).replace(/-/g, '+').replace(/_/g, '/'));
+  const b = atob((s + pad).replace(/-/g,'+').replace(/_/g,'/'));
   const ua = new Uint8Array(b.length);
   for (let i=0;i<b.length;i++) ua[i] = b.charCodeAt(i);
   return ua;
 }
-/* ---------- tiny XorShift32 to mirror Python ---------- */
+
+/*** Tiny PRNG (must match Python) ***/
 class XorShift32 {
-  constructor(seed){ this.state = seed>>>0 || 0xDEADBEEF }
+  constructor(seed){ this.state = (seed>>>0) || 0xDEADBEEF }
   rand32(){
     let x = this.state>>>0;
     x ^= (x << 13) >>> 0;
@@ -91,107 +94,97 @@ class XorShift32 {
   }
   randint(a,b){ return a + (this.rand32() % (b - a + 1)) }
 }
-/* ---------- robust soliton CDF (same math as Python) ---------- */
+
+/*** Robust Soliton (same parameters as sender) ***/
 function robustSolitonCDF(K, c=0.1, delta=0.5){
   let R = Math.max(1, Math.floor(c*Math.log(K/delta)*Math.sqrt(K)));
   const tau = new Array(K+1).fill(0);
   for (let d=1; d<K; d++){
     if (1 <= d && d < Math.floor(K/R)) tau[d] = R/(d*K);
-    else if (d === Math.floor(K/R)) tau[d] = R*Math.log(R/delta)/K;
+    else if (d === Math.floor(K/R))   tau[d] = R*Math.log(R/delta)/K;
   }
-  const rho = new Array(K+1).fill(0);
-  rho[1] = 1.0/K;
+  const rho = new Array(K+1).fill(0); rho[1] = 1.0/K;
   for (let d=2; d<=K; d++) rho[d] = 1.0/(d*(d-1));
-  let Z = 0;
-  for (let d=1; d<=K; d++) Z += rho[d] + tau[d];
+  let Z = 0; for (let d=1; d<=K; d++) Z += rho[d] + tau[d];
   const pmf = new Array(K+1).fill(0);
   for (let d=1; d<=K; d++) pmf[d] = (rho[d] + tau[d]) / Z;
-  const cdf = [0.0];
-  let s = 0;
+  const cdf = [0.0]; let s = 0;
   for (let d=1; d<=K; d++){ s += pmf[d]; cdf.push(s); }
   cdf[cdf.length-1] = 1.0;
   return cdf;
 }
-function sampleDegree(cdf, rng){
-  const u = (rng.rand32()>>>0) / 0x100000000;
-  let lo = 1, hi = cdf.length-1;
-  while (lo < hi){
-    const mid = (lo+hi)>>1;
-    if (cdf[mid] >= u) hi = mid; else lo = mid+1;
-  }
-  return lo;
-}
-/* ---------- Decoder state ---------- */
+
+/*** Session + Decoder state ***/
 let sess = {
-  sid:null, len:0, K:0, cs:0, fec_seed:0,
-  cdf:null,
-  // collected symbols: payload bytes (Uint8Array) de-duplicated by symbol id
-  seen:new Set(),
-  symbols:[],        // {i,payload}
-  // LT decoding structures
-  eqs:[],            // each equation: {idxs: Set<int>, data: Uint8Array}
-  solved:new Map(),  // chunkIndex -> Uint8Array
+  sid:null, len:0, K:0, cs:0, fec_seed:0, cdf:null,
+  seen:new Set(),   // symbol ids seen
+  eqs:[],           // equations: {idxs:Set<int>, data:Uint8Array}
+  solved:new Map(), // chunkIndex -> Uint8Array
   solvedCount:0
 };
+
 function resetSession(meta){
   sess.sid = meta.sid;
   sess.len = meta.len|0;
-  sess.K = meta.K|0;
-  sess.cs = meta.cs|0;
-  sess.fec_seed = meta.r|0;
+  sess.K   = meta.K|0;
+  sess.cs  = meta.cs|0;
+  sess.fec_seed = u32(meta.r);           // FIX: keep unsigned
   sess.cdf = robustSolitonCDF(sess.K);
-  sess.seen.clear(); sess.symbols.length = 0;
-  sess.eqs = []; sess.solved.clear(); sess.solvedCount = 0;
+  sess.seen.clear(); sess.eqs.length=0; sess.solved.clear(); sess.solvedCount=0;
+  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, other:0 };
   updateUI();
 }
-/* Recreate the same subset indices used by the encoder (given symbol id) */
+
+/*** Reproduce chosen indices (must match Python) ***/
 function chosenIndices(symId){
-  const rng = new XorShift32((sess.fec_seed ^ symId ^ (sess.K<<16)) >>> 0);
-  const d = Math.max(1, Math.min(sess.K, sampleDegree(sess.cdf, rng)));
+  const rng = new XorShift32(u32(sess.fec_seed ^ symId ^ (sess.K<<16)));
+  const cdf = sess.cdf;
+  // sample degree
+  const d = Math.max(1, Math.min(sess.K, (function sample(){
+    const u = (rng.rand32()>>>0) / 0x100000000;
+    let lo=1, hi=cdf.length-1;
+    while (lo<hi){ const mid=(lo+hi)>>1; (cdf[mid]>=u)?(hi=mid):(lo=mid+1); }
+    return lo;
+  })()));
+  // choose d distinct
   const chosen = new Set();
   while (chosen.size < d) chosen.add(rng.randint(0, sess.K-1));
   return Array.from(chosen).sort((a,b)=>a-b);
 }
-/* Insert new symbol -> equation, then run peeling decoder */
+
+/*** Ingest & decode (peeling) ***/
 function ingestSymbol(symId, payload){
-  // Build equation: XOR of unknown source chunks at indices 'idxs' equals 'payload'
   const idxs = chosenIndices(symId);
-  // reduce using already solved chunks
-  const data = payload.slice(); // copy
+  // reduce by known chunks
+  const data = payload.slice();
   for (const k of Array.from(sess.solved.keys()).sort((a,b)=>a-b)){
-    if (idxs.includes(k)){
+    const pos = idxs.indexOf(k);
+    if (pos>=0){
       const ck = sess.solved.get(k);
       for (let i=0;i<data.length;i++) data[i]^=ck[i];
-      // remove k from idxs
-      const p = idxs.indexOf(k);
-      if (p>=0) idxs.splice(p,1);
+      idxs.splice(pos,1);
     }
   }
-  if (idxs.length===0){
-    // equation is 0 = data; should be zero; ignore minor inconsistencies
-    return;
-  }
+  if (idxs.length===0) return; // nothing useful
   sess.eqs.push({idxs:new Set(idxs), data});
   peel();
 }
+
 function peel(){
   let progress=true;
   while(progress){
     progress=false;
-    // find degree-1 equations
-    for (let e of sess.eqs){
+    for (const e of sess.eqs){
       if (e.idxs.size===1){
         const k = e.idxs.values().next().value;
         if (!sess.solved.has(k)){
-          // we found chunk k
           sess.solved.set(k, e.data);
           sess.solvedCount++;
-          // substitute k into all other equations
-          for (let f of sess.eqs){
+          // substitute into others
+          for (const f of sess.eqs){
             if (f===e) continue;
             if (f.idxs.has(k)){
-              const ck = e.data;
-              const fd = f.data;
+              const ck = e.data, fd=f.data;
               for (let i=0;i<fd.length;i++) fd[i]^=ck[i];
               f.idxs.delete(k);
             }
@@ -200,17 +193,13 @@ function peel(){
         }
       }
     }
-    // drop fully reduced equations
     sess.eqs = sess.eqs.filter(e=>e.idxs.size>0);
   }
   updateUI();
-  // Check completion
-  if (sess.solvedCount >= sess.K){
-    assembleAndEnableSave();
-  }
+  if (sess.solvedCount >= sess.K) assembleAndEnableSave();
 }
+
 function assembleAndEnableSave(){
-  // order chunks 0..K-1 (zero-padded to cs), then trim to total len
   const out = new Uint8Array(sess.K * sess.cs);
   for (let k=0;k<sess.K;k++){
     const c = sess.solved.get(k) || new Uint8Array(sess.cs);
@@ -221,15 +210,14 @@ function assembleAndEnableSave(){
   const url = URL.createObjectURL(blob);
   const saveBtn = document.getElementById('saveBtn');
   saveBtn.onclick = ()=>{
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `qrstream_${sess.sid}.bin`;
-    a.click();
+    const a=document.createElement('a');
+    a.href=url; a.download=`qrstream_${sess.sid}.bin`; a.click();
   };
   saveBtn.disabled = false;
-  msg(`✅ Reconstructed ${finalBytes.length} bytes. You can save the file now.`);
+  msg(`✅ Reconstructed ${finalBytes.length} bytes. Save is enabled.`);
 }
-/* ---------- UI + Camera ---------- */
+
+/*** UI & Diagnostics ***/
 function msg(s){ document.getElementById('msg').textContent = s; }
 function updateUI(){
   document.getElementById('sid').textContent = sess.sid || '–';
@@ -238,92 +226,212 @@ function updateUI(){
   document.getElementById('cs').textContent = sess.cs || '?';
   document.getElementById('tot').textContent = sess.len || '?';
   document.getElementById('rec').textContent = sess.solvedCount || 0;
-  const need = Math.ceil(sess.K * 1.1); // expectation; purely for UI
-  document.getElementById('need').textContent = need;
   document.getElementById('symCount').textContent = sess.seen.size;
-  const pct = Math.min(100, Math.floor((sess.solvedCount / (sess.K||1)) * 100));
+  const need = sess.K ? Math.ceil(sess.K * 1.10) : 0;
+  document.getElementById('need').textContent = need || '?';
+  const pct = sess.K ? Math.min(100, Math.floor((sess.solvedCount/sess.K)*100)) : 0;
   document.getElementById('bar').style.width = pct + '%';
 }
-let running = false, videoStream = null, detector = null, rafId = null;
+
+const vEl = document.getElementById('video');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d', { willReadFrequently:true });
+const cameraSel = document.getElementById('cameraSel');
+const useCanvas = document.getElementById('useCanvas');
+const downscale = document.getElementById('downscale');
+const drawBoxes = document.getElementById('drawBoxes');
+const torchChk = document.getElementById('useTorch');
+const zoomRange = document.getElementById('zoom');
+
+function sizeOverlayToVideo(){
+  const rect = vEl.getBoundingClientRect();
+  overlay.width = rect.width; overlay.height = rect.height;
+}
+function drawDetectionBoxes(codes){
+  if (!drawBoxes.checked){ octx.clearRect(0,0,overlay.width,overlay.height); return; }
+  sizeOverlayToVideo();
+  octx.clearRect(0,0,overlay.width,overlay.height);
+  octx.lineWidth = 2; octx.strokeStyle = '#00e676';
+  const rw = vEl.videoWidth || 1, rh = vEl.videoHeight || 1;
+  for (const c of codes){
+    const pts = c.cornerPoints || [];
+    if (pts.length){
+      octx.beginPath();
+      for (let i=0;i<pts.length;i++){
+        const x = (pts[i].x / rw) * overlay.width;
+        const y = (pts[i].y / rh) * overlay.height;
+        if (i===0) octx.moveTo(x,y); else octx.lineTo(x,y);
+      }
+      octx.closePath(); octx.stroke();
+    }
+  }
+}
+
+/*** Camera plumbing & advanced controls ***/
+let running=false, detector=null, stream=null, rafId=null, deviceId=null;
+const off = document.createElement('canvas'); const offCtx = off.getContext('2d', { willReadFrequently:true });
+
+async function listCameras(){
+  const devs = await navigator.mediaDevices.enumerateDevices();
+  cameraSel.innerHTML = "";
+  for (const d of devs){
+    if (d.kind==='videoinput'){
+      const opt = document.createElement('option');
+      opt.value = d.deviceId; opt.textContent = d.label || `Camera ${cameraSel.length+1}`;
+      cameraSel.appendChild(opt);
+    }
+  }
+  if (!deviceId && cameraSel.options.length){
+    const envIdx = Array.from(cameraSel.options).findIndex(o => /back|rear|environment/i.test(o.textContent));
+    cameraSel.selectedIndex = envIdx >= 0 ? envIdx : 0;
+    deviceId = cameraSel.value;
+  }
+}
+cameraSel.onchange = ()=>{ deviceId=cameraSel.value; if (running){ stop(); start(); } };
+
+function applyAdvanced(track){
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  if (caps.torch){ torchChk.disabled=false; torchChk.onchange=()=>track.applyConstraints({advanced:[{torch:torchChk.checked}]}).catch(()=>{}); }
+  else { torchChk.disabled=true; }
+  if (caps.zoom){
+    zoomRange.min=caps.zoom.min||1; zoomRange.max=caps.zoom.max||1; zoomRange.step=caps.zoom.step||0.1;
+    zoomRange.value = track.getSettings().zoom || zoomRange.min;
+    zoomRange.oninput=()=>track.applyConstraints({advanced:[{zoom:Number(zoomRange.value)}]}).catch(()=>{});
+  } else { zoomRange.min=zoomRange.max=1; zoomRange.value=1; }
+}
+
+/*** Per-second stats & reasons ***/
+let detPerSec=0, accPerSec=0, lastLen=0, hadPrefix=false, lastErr="";
+let reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, other:0 };
+setInterval(()=>{
+  const track = stream ? stream.getVideoTracks()[0] : null;
+  const st = track ? track.getSettings() : {};
+  document.getElementById('camInfo').textContent =
+`Detections/s: ${detPerSec}   Accepted/s: ${accPerSec}
+Last raw length: ${lastLen}   QS1 prefix: ${hadPrefix}
+Video: ${vEl.videoWidth||0}x${vEl.videoHeight||0}  fps(set): ${st.frameRate||'?'}
+Reasons (per s): ${JSON.stringify(reasons)}`;
+  detPerSec=0; accPerSec=0; reasons={ sid:0, K:0, cs:0, r:0, dup:0, parse:0, other:0 };
+}, 1000);
+
+function showBasics(){
+  const hasBD = ('BarcodeDetector' in window);
+  const hasGUM = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const secure = window.isSecureContext;
+  const proto = location.protocol;
+  const origin = location.origin || location.href;
+  document.getElementById('diag').textContent =
+`BarcodeDetector: ${hasBD}
+getUserMedia: ${hasGUM}
+isSecureContext: ${secure} (protocol=${proto})
+origin: ${origin}`;
+}
+showBasics();
+
+/*** Start/Stop/Loop ***/
+document.getElementById('startBtn').onclick = start;
+document.getElementById('stopBtn').onclick  = stop;
+
 async function start(){
-  if (!('BarcodeDetector' in window)){
-    msg("❌ This browser doesn't support BarcodeDetector API.\nTry Chrome/Edge on Android or load a desktop browser that supports it.\nFallback tips are below in the file.");
-    return;
-  }
+  if (!('BarcodeDetector' in window)){ msg("❌ No BarcodeDetector. Use Chrome/Edge or desktop."); return; }
+  detector = new BarcodeDetector({formats:['qr_code']});
+  await listCameras();
   try{
-    detector = new BarcodeDetector({formats:['qr_code']});
+    const constraints = {
+      video: deviceId ? {deviceId:{exact:deviceId}} : {facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}},
+      audio:false
+    };
+    stream = await navigator.mediaDevices.getUserMedia(constraints);
+    vEl.srcObject = stream; await vEl.play();
+    const track = stream.getVideoTracks()[0];
+    applyAdvanced(track);
   }catch(e){
-    msg("❌ BarcodeDetector not available: " + e);
-    return;
+    msg('getUserMedia error: ' + (e && e.name ? e.name : e)); return;
   }
-  videoStream = await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment', width:{ideal:1280}, height:{ideal:720}}, audio:false});
-  const v = document.getElementById('video');
-  v.srcObject = videoStream;
-  await v.play();
-  running = true;
-  document.getElementById('startBtn').disabled = true;
-  document.getElementById('stopBtn').disabled = false;
-  document.getElementById('camInfo').textContent = 'Camera running…';
-  loop();
+  running=true;
+  document.getElementById('startBtn').disabled=true;
+  document.getElementById('stopBtn').disabled=false;
+  requestAnimationFrame(loop);
 }
+
 function stop(){
-  running = false;
+  running=false;
   if (rafId) cancelAnimationFrame(rafId);
-  if (videoStream){
-    for (const t of videoStream.getTracks()) t.stop();
-    videoStream = null;
-  }
-  document.getElementById('startBtn').disabled = false;
-  document.getElementById('stopBtn').disabled = true;
-  document.getElementById('camInfo').textContent = 'Camera stopped.';
+  if (stream){ for (const t of stream.getTracks()) t.stop(); stream=null; }
+  document.getElementById('startBtn').disabled=false;
+  document.getElementById('stopBtn').disabled=true;
+  octx.clearRect(0,0,overlay.width,overlay.height);
 }
+
+function updateLastFrameDiag(frame, accepted, why){
+  const rHex = frame && (u32(frame.r)).toString(16).padStart(8,'0');
+  const sHex = sess.fec_seed ? (sess.fec_seed).toString(16).padStart(8,'0') : '--------';
+  document.getElementById('last').textContent =
+`Last frame:
+  sid match: ${frame && (frame.sid===sess.sid)}
+  K   match: ${frame && (frame.K===sess.K)}
+  cs  match: ${frame && (frame.cs===sess.cs)}
+  r   match: ${frame && (u32(frame.r)===sess.fec_seed)}   (frame.r=0x${rHex}, sess.fec_seed=0x${sHex})
+  symId: ${frame ? frame.i : '–'}   accepted: ${accepted}   reason: ${why||'-'}`;
+}
+
 async function loop(){
   if (!running) return;
-  const v = document.getElementById('video');
+  sizeOverlayToVideo();
+  let codes = [];
   try{
-    const codes = await detector.detect(v);
-    for (const code of codes){
-        if (codes && codes.length) {
-            _seenInLastSec += codes.length;
-            const raw = codes[0].rawValue || '';
-            _lastLen = raw.length;
-            _hasPrefix = raw.startsWith('QS1|');
-        }
-      const raw = code.rawValue || '';
-      if (typeof raw === 'string' && raw.startsWith('QS1|')){
-        try{
-          const frame = JSON.parse(raw.slice(4));
-          // new session?
-          if (!sess.sid || sess.sid !== frame.sid){
-            resetSession(frame);
-            msg('New session detected.');
-          }
-          // sanity check
-          if (frame.sid===sess.sid && frame.K===sess.K && frame.cs===sess.cs && frame.r===sess.fec_seed){
-            if (!sess.seen.has(frame.i)){
-              sess.seen.add(frame.i);
-              const payload = b64uToBytes(frame.p);
-              ingestSymbol(frame.i, payload);
-              updateUI();
-            }
-          }
-        }catch(e){}
-      }
+    codes = await detector.detect(vEl);
+    if (!codes.length && document.getElementById('useCanvas').checked){
+      // downscale and try again
+      const ds = Math.max(1, Number(document.getElementById('downscale').value));
+      const w = vEl.videoWidth || 640, h = vEl.videoHeight || 480;
+      off.width = Math.floor(w/ds); off.height = Math.floor(h/ds);
+      offCtx.imageSmoothingEnabled = false;
+      offCtx.drawImage(vEl, 0, 0, off.width, off.height);
+      codes = await detector.detect(off);
     }
-  }catch(e){
-    // ignore transient errors
+  }catch(e){ lastErr = e.message || String(e); }
+
+  if (codes && codes.length){
+    detPerSec += codes.length;
+    drawDetectionBoxes(codes);
+    for (const code of codes){
+      const raw = code.rawValue || '';
+      lastLen = raw.length; hadPrefix = raw.startsWith('QS1|');
+      if (!hadPrefix) continue;
+      let frame=null;
+      try{ frame = JSON.parse(raw.slice(4)); }
+      catch(_){ reasons.parse++; updateLastFrameDiag(null,false,'parse'); continue; }
+
+      // New session?
+      if (!sess.sid || sess.sid !== frame.sid) resetSession(frame);
+
+      // Gating with UNSIGNED seed comparison
+      const okSid = frame.sid===sess.sid;
+      const okK   = frame.K===sess.K;
+      const okCs  = frame.cs===sess.cs;
+      const okR   = u32(frame.r)===sess.fec_seed;
+
+      if (!(okSid && okK && okCs && okR)){
+        if (!okSid) reasons.sid++; else if (!okK) reasons.K++; else if (!okCs) reasons.cs++; else if (!okR) reasons.r++; else reasons.other++;
+        updateLastFrameDiag(frame,false, !okSid?'sid':!okK?'K':!okCs?'cs':'r');
+        continue;
+      }
+
+      if (sess.seen.has(frame.i)){ reasons.dup++; updateLastFrameDiag(frame,false,'dup'); continue; }
+
+      // Accept symbol
+      sess.seen.add(frame.i);
+      accPerSec++;
+      const payload = b64uToBytes(frame.p);
+      ingestSymbol(frame.i, payload);
+      updateUI();
+      updateLastFrameDiag(frame,true,'ok');
+    }
+  }else{
+    drawDetectionBoxes([]);
   }
   rafId = requestAnimationFrame(loop);
 }
-document.getElementById('startBtn').onclick = start;
-document.getElementById('stopBtn').onclick = stop;
 </script>
-
-<!--
-Fallbacks if your phone doesn't support BarcodeDetector:
-- Use a recent Chrome/Edge on Android (usually works).
-- Or run this page on a laptop with a webcam (Chrome/Edge) and scan from there.
-- If you must use iOS Safari today, install a QR-to-clipboard app and
-  build a tiny “bridge” page that accepts pasted frames — ping me and I’ll add it.
--->
 </html>
