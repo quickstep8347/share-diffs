@@ -14,6 +14,7 @@
   button[disabled]{opacity:.5;cursor:not-allowed}
   .small{opacity:.85;font-size:.9em}
   video{width:100%;max-width:520px;background:#000;border-radius:12px}
+  .video-wrap{position:relative}
   canvas#overlay{position:absolute;left:0;top:0;width:100%;height:100%;pointer-events:none}
   code{background:#222;padding:2px 6px;border-radius:6px}
   .kv{display:grid;grid-template-columns:auto 1fr;gap:4px 10px}
@@ -24,7 +25,7 @@
   <div class="row">
     <!-- Camera -->
     <div class="card" style="flex:1;min-width:320px">
-      <div style="position:relative">
+      <div class="video-wrap">
         <video id="video" autoplay playsinline></video>
         <canvas id="overlay"></canvas>
       </div>
@@ -33,9 +34,6 @@
         <button id="startBtn">Start</button>
         <button id="stopBtn" class="secondary" disabled>Stop</button>
         <select id="cameraSel"></select>
-        <label class="small"><input type="checkbox" id="useCanvas"> Use offscreen canvas</label>
-        <label class="small">Downscale <input id="downscale" type="range" min="1" max="4" value="1"></label>
-        <label class="small"><input type="checkbox" id="drawBoxes" checked> Draw boxes</label>
       </div>
     </div>
 
@@ -75,7 +73,7 @@
 </main>
 
 <script>
-/*** Helpers ***/
+/***** Helpers *****/
 const u32 = n => (n >>> 0);
 function b64uToBytes(s){
   const pad = "=".repeat((4 - (s.length % 4)) % 4);
@@ -85,7 +83,7 @@ function b64uToBytes(s){
   return ua;
 }
 
-/*** Tiny PRNG (match Python) ***/
+/***** Tiny PRNG (match Python) *****/
 class XorShift32 {
   constructor(seed){ this.state = (seed>>>0) || 0xDEADBEEF }
   rand32(){
@@ -96,13 +94,13 @@ class XorShift32 {
   randint(a,b){ return a + (this.rand32() % (b - a + 1)) }
 }
 
-/*** Diagnostics config ***/
+/***** Diagnostics config *****/
 const DEDUP_WINDOW_MS = 220;       // ignore events for same id within this window
 const LOG_DUP_EVENTS = false;      // don't store 'dup' in history
 const UNIQUE_REASONS_PER_ID = true; // store only first + unique reasons per id
 const HISTORY_LIMIT = 2000;        // max symbol ids tracked
 
-/*** History structures and helpers ***/
+/***** History structures and helpers *****/
 const hist = new Map();
 const recentById = new Map();
 let degHist = {};
@@ -114,17 +112,8 @@ function noteOutcome(id, outcome){
   if (recentById.has(id) && (now - recentById.get(id) < DEDUP_WINDOW_MS)) return;
   let h = hist.get(id);
   if (!h){
-    if (hist.size >= HISTORY_LIMIT){
-      const oldestKey = hist.keys().next().value;
-      hist.delete(oldestKey);
-    }
-    h = {
-      first: outcome,
-      reasons: new Set([outcome.type]),
-      events: [outcome],
-      counts: { [outcome.type]: 1 },
-      lastTs: now
-    };
+    if (hist.size >= HISTORY_LIMIT){ const oldestKey = hist.keys().next().value; hist.delete(oldestKey); }
+    h = { first: outcome, reasons: new Set([outcome.type]), events: [outcome], counts: { [outcome.type]: 1 }, lastTs: now };
     hist.set(id, h);
   } else {
     if (!LOG_DUP_EVENTS && outcome.type === 'dup'){ recentById.set(id, now); return; }
@@ -146,28 +135,24 @@ function renderHistory(){
   const freeze = document.getElementById('freezeDiag')?.checked;
   if (freeze) return;
   const totals = { accept:0, dup:0, sid:0, K:0, cs:0, r:0, d:0, parse:0, plen:0, other:0 };
-  for (const [,h] of hist){
-    totals[h.first.type] = (totals[h.first.type] || 0) + 1;
-  }
+  for (const [,h] of hist){ totals[h.first.type] = (totals[h.first.type] || 0) + 1; }
   const degSummary = Object.keys(degHist).sort((a,b)=>Number(a)-Number(b)).map(k=>`d=${k}:${degHist[k]}`).join('  ');
-  const histSummaryEl = document.getElementById('histSummary');
-  histSummaryEl.textContent =
+  document.getElementById('histSummary').textContent =
 `Symbols tracked: ${hist.size}
-First-event breakdown: ${Object.entries(totals).map(([k,v])=>\`\${k}=\${v}\`).join('  ')}
+First-event breakdown: ${Object.entries(totals).map(([k,v])=>\`${'${'}k}${'='}${'${'}v}\`).join('  ')}
 Degree histogram (accepted): ${degSummary}
 Raw degree-1 seen: ${rawDeg1Seen}`;
-  const histListEl = document.getElementById('histList');
   const recent = Array.from(hist.entries()).slice(-20);
   const lines = [];
   for (const [id, h] of recent){
     const f = h.first;
-    const evs = h.events.map(e => `${e.type}${e.d!=null?`(d=${e.d})`:''}@${(e.t % 1e7)|0}`).join(', ');
-    lines.push(`i=${id}  first=${f.type}${f.d!=null?`(d=${f.d})`:''}  counts=${JSON.stringify(h.counts)}  | ${evs}`);
+    const evs = h.events.map(e => `${'${'}e.type}${'${'}(e.d!=null?\`(d=${'${'}e.d}\`) : ''}${'}'}@${'${'}(e.t % 1e7)|0}`).join(', ');
+    lines.push(`i=${'${'}id}  first=${'${'}f.type}${'${'}(f.d!=null?\`(d=${'${'}f.d}\`) : '')}  counts=${'${'}JSON.stringify(h.counts)}  | ${'${'}evs}`);
   }
-  histListEl.textContent = lines.join('\n');
+  document.getElementById('histList').textContent = lines.join('\n');
 }
 
-/*** Session + Decoder ***/
+/***** Session + Decoder *****/
 let sess = {
   sid:null, len:0, K:0, cs:0, fec_seed:0,
   seen:new Set(), eqs:[], solved:new Map(), solvedCount:0
@@ -180,8 +165,7 @@ function resetSession(meta){
   sess.cs  = meta.cs | 0;
   sess.fec_seed = u32(meta.r);
   sess.seen.clear(); sess.eqs.length = 0; sess.solved.clear(); sess.solvedCount = 0;
-  degHist = {};
-  rawDeg1Seen = 0;
+  degHist = {}; rawDeg1Seen = 0;
   reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
   updateUI(); updateEqStats(); renderHistory();
 }
@@ -190,9 +174,7 @@ function chosenIndices(symId, d){
   const rng = new XorShift32((sess.fec_seed ^ symId ^ (sess.K << 16)) >>> 0);
   const D = Math.max(1, Math.min(sess.K, d | 0));
   const chosen = new Set();
-  while (chosen.size < D){
-    chosen.add(rng.randint(0, sess.K - 1));
-  }
+  while (chosen.size < D){ chosen.add(rng.randint(0, sess.K - 1)); }
   const idxs = Array.from(chosen).sort((a,b)=>a-b);
   return { idxs, d: D, hash: hashIdxs(idxs) };
 }
@@ -253,17 +235,12 @@ function assembleAndEnableSave(){
   const finalBytes = out.slice(0, sess.len);
   const url = URL.createObjectURL(new Blob([finalBytes], {type:"application/octet-stream"}));
   const saveBtn = document.getElementById('saveBtn');
-  saveBtn.onclick = () => {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `qrstream_${sess.sid}.bin`;
-    a.click();
-  };
+  saveBtn.onclick = () => { const a = document.createElement('a'); a.href = url; a.download = `qrstream_${'${'}sess.sid}.bin`; a.click(); };
   saveBtn.disabled = false;
-  msg(`✅ Reconstructed ${finalBytes.length} bytes. Save is enabled.`);
+  msg(`✅ Reconstructed ${'${'}finalBytes.length} bytes. Save is enabled.`);
 }
 
-/*** UI helpers ***/
+/***** UI helpers *****/
 function msg(s){ document.getElementById('msg').textContent = s; }
 function updateUI(){
   document.getElementById('sid').textContent = sess.sid || '–';
@@ -281,47 +258,35 @@ function updateUI(){
 function updateEqStats(){
   let m = Infinity, d1 = 0, d2 = 0, d3 = 0;
   for (const e of sess.eqs){
-    const s = e.idxs.size;
-    m = Math.min(m, s);
+    const s = e.idxs.size; m = Math.min(m, s);
     if (s === 1) d1++; else if (s === 2) d2++; else if (s === 3) d3++;
   }
   const minDeg = (m === Infinity ? 0 : m);
   document.getElementById('eqstats').textContent =
-`Equations: ${sess.eqs.length}, min degree in system: ${minDeg} (d1=${d1}, d2=${d2}, d3=${d3})
-Total deg=1 seen (raw): ${rawDeg1Seen}`;
+`Equations: ${'${'}sess.eqs.length}, min degree in system: ${'${'}minDeg} (d1=${'${'}d1}, d2=${'${'}d2}, d3=${'${'}d3})
+Total deg=1 seen (raw): ${'${'}rawDeg1Seen}`;
 }
 
-/*** Camera and detection ***/
+/***** Camera and detection *****/
 const vEl = document.getElementById('video');
 const overlay = document.getElementById('overlay');
 const octx = overlay.getContext('2d', {willReadFrequently:true});
 const cameraSel = document.getElementById('cameraSel');
-const useCanvas = document.getElementById('useCanvas');
-const downscale = document.getElementById('downscale');
-const drawBoxes = document.getElementById('drawBoxes');
 
 let running = false, detector = null, stream = null, rafId = null, deviceId = null;
-const off = document.createElement('canvas');
-const offCtx = off.getContext('2d', {willReadFrequently:true});
 let detPerSec = 0, accPerSec = 0, lastLen = 0, hadPrefix = false, lastErr = "";
 let reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
 
 function sizeOverlayToVideo(){
   const r = vEl.getBoundingClientRect();
-  overlay.width = r.width;
-  overlay.height = r.height;
+  overlay.width = r.width; overlay.height = r.height;
 }
 function drawDetectionBoxes(codes){
-  if (!drawBoxes.checked){
-    octx.clearRect(0, 0, overlay.width, overlay.height);
-    return;
-  }
+  // Always draw boxes (no toggle)
   sizeOverlayToVideo();
   octx.clearRect(0, 0, overlay.width, overlay.height);
-  octx.lineWidth = 2;
-  octx.strokeStyle = '#00e676';
-  const rw = vEl.videoWidth || 1;
-  const rh = vEl.videoHeight || 1;
+  octx.lineWidth = 2; octx.strokeStyle = '#00e676';
+  const rw = vEl.videoWidth || 1, rh = vEl.videoHeight || 1;
   for (const c of codes){
     const pts = c.cornerPoints || [];
     if (!pts.length) continue;
@@ -329,43 +294,37 @@ function drawDetectionBoxes(codes){
     for (let i=0;i<pts.length;i++){
       const x = (pts[i].x / rw) * overlay.width;
       const y = (pts[i].y / rh) * overlay.height;
-      if (i === 0) octx.moveTo(x, y); else octx.lineTo(x, y);
+      if (i===0) octx.moveTo(x,y); else octx.lineTo(x,y);
     }
-    octx.closePath();
-    octx.stroke();
+    octx.closePath(); octx.stroke();
   }
 }
 
 async function listCameras(){
   const devs = await navigator.mediaDevices.enumerateDevices();
   cameraSel.innerHTML = "";
-  for (const d of devs){
-    if (d.kind === 'videoinput'){
-      const opt = document.createElement('option');
-      opt.value = d.deviceId;
-      opt.textContent = d.label || `Camera ${cameraSel.length + 1}`;
-      cameraSel.appendChild(opt);
-    }
-  }
+  for (const d of devs){ if (d.kind === 'videoinput'){
+    const opt = document.createElement('option');
+    opt.value = d.deviceId; opt.textContent = d.label || `Camera ${'${'}cameraSel.length+1}`;
+    cameraSel.appendChild(opt);
+  }}
   if (!deviceId && cameraSel.options.length){
     const envIdx = Array.from(cameraSel.options).findIndex(o => /back|rear|environment/i.test(o.textContent));
-    cameraSel.selectedIndex = envIdx >= 0 ? envIdx : 0;
-    deviceId = cameraSel.value;
+    cameraSel.selectedIndex = envIdx >= 0 ? envIdx : 0; deviceId = cameraSel.value;
   }
 }
+
 cameraSel.onchange = () => { deviceId = cameraSel.value; if (running){ stop(); start(); } };
 
 setInterval(() => {
   const track = stream ? stream.getVideoTracks()[0] : null;
   const st = track ? track.getSettings() : {};
   document.getElementById('camInfo').textContent =
-`Detections/s: ${detPerSec}   Accepted/s: ${accPerSec}
-Last raw length: ${lastLen}   QS1 prefix: ${hadPrefix}
-Video: ${vEl.videoWidth||0}x${vEl.videoHeight||0}  fps(set): ${st.frameRate||'?'}
-Reasons (per s): ${JSON.stringify(reasons)}  Last error: ${lastErr || '—'}`;
-  detPerSec = 0;
-  accPerSec = 0;
-  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
+`Detections/s: ${'${'}detPerSec}   Accepted/s: ${'${'}accPerSec}
+Last raw length: ${'${'}lastLen}   QS1 prefix: ${'${'}hadPrefix}
+Video: ${'${'}vEl.videoWidth||0}x${'${'}vEl.videoHeight||0}  fps(set): ${'${'}st.frameRate||'?'}
+Reasons (per s): ${'${'}JSON.stringify(reasons)}  Last error: ${'${'}lastErr || '—'}`;
+  detPerSec = 0; accPerSec = 0; reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
 }, 1000);
 
 function showBasics(){
@@ -373,15 +332,12 @@ function showBasics(){
   const hasGUM = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   const secure = window.isSecureContext;
   document.getElementById('diag').textContent =
-`BarcodeDetector: ${hasBD}
-getUserMedia: ${hasGUM}
-isSecureContext: ${secure} (protocol=${location.protocol})
-origin: ${location.origin || location.href}`;
+`BarcodeDetector: ${'${'}hasBD}
+getUserMedia: ${'${'}hasGUM}
+isSecureContext: ${'${'}secure} (protocol=${'${'}location.protocol})
+origin: ${'${'}location.origin || location.href}`;
 }
 showBasics();
-
-document.getElementById('startBtn').onclick = start;
-document.getElementById('stopBtn').onclick  = stop;
 
 async function start(){
   if (!('BarcodeDetector' in window)){
@@ -397,9 +353,8 @@ async function start(){
       audio: false
     };
     stream = await navigator.mediaDevices.getUserMedia(constraints);
-    vEl.srcObject = stream;
-    await vEl.play();
-  } catch(e){
+    vEl.srcObject = stream; await vEl.play();
+  }catch(e){
     msg('getUserMedia error: ' + (e && e.name ? e.name : e));
     return;
   }
@@ -410,129 +365,94 @@ async function start(){
 }
 
 function stop(){
-  running = false;
-  if (rafId) cancelAnimationFrame(rafId);
-  if (stream){
-    for (const t of stream.getTracks()) t.stop();
-    stream = null;
-  }
+  running = false; if (rafId) cancelAnimationFrame(rafId);
+  if (stream){ for (const t of stream.getTracks()) t.stop(); stream = null; }
   document.getElementById('startBtn').disabled = false;
   document.getElementById('stopBtn').disabled = true;
-  octx.clearRect(0, 0, overlay.width, overlay.height);
+  octx.clearRect(0,0,overlay.width,overlay.height);
 }
 
-function updateLastFrameDiag(frame, accepted, why){
+document.getElementById('startBtn').onclick = start;
+.document.getElementById('stopBtn').onclick  = stop;
+
+def function updateLastFrameDiag(frame, accepted, why){
   const rHex = frame && (u32(frame.r)).toString(16).padStart(8,'0');
   const sHex = sess.fec_seed ? (sess.fec_seed).toString(16).padStart(8,'0') : '--------';
   const dShow = frame && frame.d;
   document.getElementById('last').textContent =
 `Last frame:
-  sid match: ${frame && (frame.sid === sess.sid)}
-  K   match: ${frame && (frame.K === sess.K)}
-  cs  match: ${frame && (frame.cs === sess.cs)}
-  r   match: ${frame && (u32(frame.r) === sess.fec_seed)}   (frame.r=0x${rHex}, sess.fec_seed=0x${sHex})
-  d (degree): ${dShow}
-  symId: ${frame ? frame.i : '–'}   accepted: ${accepted}   reason: ${why || '-'}`;
+  sid match: ${'${'}frame && (frame.sid === sess.sid)}
+  K   match: ${'${'}frame && (frame.K === sess.K)}
+  cs  match: ${'${'}frame && (frame.cs === sess.cs)}
+  r   match: ${'${'}frame && (u32(frame.r) === sess.fec_seed)}   (frame.r=0x${'${'}rHex}, sess.fec_seed=0x${'${'}sHex})
+  d (degree): ${'${'}dShow}
+  symId: ${'${'}frame ? frame.i : '–'}   accepted: ${'${'}accepted}   reason: ${'${'}why || '-'}`;
 }
 
 async function loop(){
   if (!running) return;
-  sizeOverlayToVideo();
   let codes = [];
   try{
     codes = await detector.detect(vEl);
-    if (!codes.length && useCanvas.checked){
-      const ds = Math.max(1, Number(downscale.value));
-      const w = vEl.videoWidth || 640;
-      const h = vEl.videoHeight || 480;
-      off.width = Math.floor(w / ds);
-      off.height = Math.floor(h / ds);
-      offCtx.imageSmoothingEnabled = false;
-      offCtx.drawImage(vEl, 0, 0, off.width, off.height);
-      codes = await detector.detect(off);
-    }
-  } catch(e){
-    lastErr = e.message || String(e);
-  }
+  }catch(e){ lastErr = e.message || String(e); }
+
   if (codes && codes.length){
-    detPerSec += codes.length;
-    drawDetectionBoxes(codes);
+    detPerSec += codes.length; drawDetectionBoxes(codes);
     for (const code of codes){
       const raw = code.rawValue || '';
-      lastLen = raw.length;
-      hadPrefix = raw.startsWith('QS1|');
+      lastLen = raw.length; hadPrefix = raw.startsWith('QS1|');
       if (!hadPrefix) continue;
-      let frame = null;
-      try {
-        frame = JSON.parse(raw.slice(4));
-      } catch(e){
-        reasons.parse++;
-        noteOutcome(-1, { t: performance.now(), type: 'parse' });
-        updateLastFrameDiag(null, false, 'parse');
-        renderHistory();
-        continue;
-      }
-      if (!sess.sid || sess.sid !== frame.sid){
-        resetSession(frame);
-      }
+      let frame=null;
+      try{ frame = JSON.parse(raw.slice(4)); }
+      catch(e){ reasons.parse++; noteOutcome(-1, { t: performance.now(), type:'parse' }); updateLastFrameDiag(null,false,'parse'); renderHistory(); continue; }
+
+      if (!sess.sid || sess.sid !== frame.sid) resetSession(frame);
+
       const okSid = frame.sid === sess.sid;
       const okK   = frame.K === sess.K;
       const okCs  = frame.cs === sess.cs;
       const okR   = u32(frame.r) === sess.fec_seed;
       const okD   = (typeof frame.d === 'number') && frame.d >= 1 && frame.d <= sess.K;
-      let payload = null;
-      let okPlen = true;
-      try {
-        payload = b64uToBytes(frame.p);
-        okPlen = (payload.length === sess.cs);
-      } catch(e){
-        okPlen = false;
-      }
+
+      let payload = null; let okPlen = true;
+      try{ payload = b64uToBytes(frame.p); okPlen = (payload.length === sess.cs); }
+      catch(e){ okPlen = false; }
+
       const now = performance.now();
       if (!(okSid && okK && okCs && okR && okD && okPlen)){
-        const reason = !okSid ? 'sid'
-                      : !okK   ? 'K'
-                      : !okCs  ? 'cs'
-                      : !okR   ? 'r'
-                      : !okD   ? 'd'
-                      : !okPlen? 'plen'
-                      : 'other';
-        reasons[reason] = (reasons[reason] || 0) + 1;
+        const reason = !okSid?'sid':!okK?'K':!okCs?'cs':!okR?'r':!okD?'d':'plen';
+        reasons[reason] = (reasons[reason]||0)+1;
         noteOutcome(frame.i, { t: now, type: reason, d: frame.d, payloadLen: payload ? payload.length : undefined });
-        updateLastFrameDiag(frame, false, reason);
-        renderHistory();
+        updateLastFrameDiag(frame,false,reason); renderHistory();
         continue;
       }
+
       if (sess.seen.has(frame.i)){
-        reasons.dup++;
-        noteOutcome(frame.i, { t: now, type: 'dup', d: frame.d });
-        updateLastFrameDiag(frame, false, 'dup');
-        renderHistory();
+        reasons.dup++; noteOutcome(frame.i, { t: now, type:'dup', d: frame.d });
+        updateLastFrameDiag(frame,false,'dup'); renderHistory();
         continue;
       }
-      sess.seen.add(frame.i);
-      accPerSec++;
+
+      // Accept symbol
+      sess.seen.add(frame.i); accPerSec++;
       const sel = chosenIndices(frame.i, frame.d);
-      noteOutcome(frame.i, { t: now, type: 'accept', d: frame.d, idxsLen: sel.idxs.length, payloadLen: payload.length });
+      noteOutcome(frame.i, { t: now, type:'accept', d: frame.d, idxsLen: sel.idxs.length, payloadLen: payload.length });
       ingestSymbol(frame.i, payload, frame.d);
-      updateUI();
-      updateLastFrameDiag(frame, true, 'ok');
-      renderHistory();
+      updateUI(); updateLastFrameDiag(frame,true,'ok'); renderHistory();
     }
   } else {
-    drawDetectionBoxes([]);
+    // No detections this frame; clear overlay to avoid stale boxes
+    octx.clearRect(0,0,overlay.width,overlay.height);
   }
   rafId = requestAnimationFrame(loop);
 }
 
-/*** Export history ***/
+/***** Export history *****/
 document.getElementById('exportHist').onclick = function(){
   const obj = Object.fromEntries(hist.entries());
   const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `qr_hist_${Date.now()}.json`;
-  a.click();
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = `qr_hist_${'${'}Date.now()}.json`; a.click();
 };
 </script>
 </html>
