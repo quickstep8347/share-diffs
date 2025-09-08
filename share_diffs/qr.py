@@ -159,8 +159,68 @@ def build_frames(data: bytes, chunk_size: int, overhead: float):
 
 _ECC_MAP = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q, "H": ERROR_CORRECT_H}
 
+from xml.etree import ElementTree as ET
+
 
 def save_qr_svg(text: str, path: str, ecc: str = "M", version: int | None = None, crisp_px: int | None = 1000):
+    """
+    Render a QR as SVG (no Pillow). If version is None -> auto-size (fit=True).
+    If version is an int -> enforce cap (fit=False); raise DataOverflowError if it won't fit.
+    After saving, patch the <svg> root to avoid duplicate width/height and add crisp rendering hints.
+    """
+    if version is None:
+        qr = qrcode.QRCode(
+            version=None,
+            error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(text)
+        qr.make(fit=True)
+    else:
+        qr = qrcode.QRCode(
+            version=version,
+            error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
+            box_size=10,
+            border=4,
+        )
+        qr.add_data(text)
+        qr.make(fit=False)
+
+    img = qr.make_image(image_factory=SvgPathImage)
+    img.save(path)
+
+    # ---- Patch the <svg> root safely (no duplicate attributes) ----
+    try:
+        ET.register_namespace("", "http://www.w3.org/2000/svg")  # preserve default ns
+        tree = ET.parse(path)
+        root = tree.getroot()  # usually '{http://www.w3.org/2000/svg}svg'
+
+        # Remove existing width/height if present, then set ours (optional)
+        if "width" in root.attrib:
+            root.attrib.pop("width", None)
+        if "height" in root.attrib:
+            root.attrib.pop("height", None)
+        if crisp_px:
+            root.set("width", str(crisp_px))
+            root.set("height", str(crisp_px))
+
+        # Crisp rendering hints (no duplicates):
+        root.set("shape-rendering", "crispEdges")
+        root.set("text-rendering", "optimizeSpeed")
+        # image-rendering is a CSS property; set it via style to be safe
+        style = root.get("style", "")
+        if "image-rendering" not in style:
+            style = (style.rstrip(";") + "; " if style else "") + "image-rendering: pixelated"
+            root.set("style", style)
+
+        tree.write(path, encoding="utf-8", xml_declaration=False)
+    except Exception:
+        # If patching fails, keep the original (it still renders inside <img>)
+        pass
+
+
+def save_qr_svg_old(text: str, path: str, ecc: str = "M", version: int | None = None, crisp_px: int | None = 1000):
     """
     Render a QR as SVG (no Pillow). If version is None -> auto-size (fit=True).
     If version is an int -> enforce cap (fit=False); raise DataOverflowError if it won't fit.
@@ -417,11 +477,11 @@ if __name__ == "__main__":
     payload = b"Hello QR stream over SVG frames! " * 400  # ~13 KB example
     out_path = generate_qr_site(
         payload,
-        out_dir="qr_site_out4",
-        chunk_size=512,  # scan-friendly default
+        out_dir="qr_site_out6",
+        chunk_size=256,  # scan-friendly default
         overhead=0.12,
         ecc="L",
-        version=None,  # cap size; set to None for auto
+        version=18,  # cap size; set to None for auto
         fps_default=5,
         title="QR Stream Sender (SVG, deterministic)",
         crisp_svg_px=1000,
