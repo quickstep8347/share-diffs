@@ -62,6 +62,7 @@
       <div><b>Diagnostics</b></div>
       <div id="diag" class="small" style="white-space:pre-wrap;margin-top:6px"></div>
       <div id="last" class="small" style="white-space:pre-wrap;margin-top:8px"></div>
+      <div id="eqstats" class="small" style="white-space:pre-wrap;margin-top:8px"></div>
       <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap">
         <button id="exportHist" class="secondary">Export history</button>
         <label class="small"><input type="checkbox" id="freezeDiag"> Freeze updates</label>
@@ -95,12 +96,12 @@ class XorShift32 {
 }
 
 /***** Diagnostics config *****/
-const DEDUP_WINDOW_MS = 220;       // ignore events for same id within this window
-const LOG_DUP_EVENTS = false;      // don't store 'dup' in history
-const UNIQUE_REASONS_PER_ID = true; // store only first + unique reasons per id
-const HISTORY_LIMIT = 2000;        // max symbol ids tracked
+const DEDUP_WINDOW_MS = 220;
+const LOG_DUP_EVENTS = false;
+const UNIQUE_REASONS_PER_ID = true;
+const HISTORY_LIMIT = 2000;
 
-/***** History structures and helpers *****/
+/***** History structures & helpers *****/
 const hist = new Map();
 const recentById = new Map();
 let degHist = {};
@@ -112,15 +113,17 @@ function noteOutcome(id, outcome){
   if (recentById.has(id) && (now - recentById.get(id) < DEDUP_WINDOW_MS)) return;
   let h = hist.get(id);
   if (!h){
-    if (hist.size >= HISTORY_LIMIT){ const oldestKey = hist.keys().next().value; hist.delete(oldestKey); }
+    if (hist.size >= HISTORY_LIMIT){
+      const oldestKey = hist.keys().next().value;
+      hist.delete(oldestKey);
+    }
     h = { first: outcome, reasons: new Set([outcome.type]), events: [outcome], counts: { [outcome.type]: 1 }, lastTs: now };
     hist.set(id, h);
   } else {
     if (!LOG_DUP_EVENTS && outcome.type === 'dup'){ recentById.set(id, now); return; }
     if (UNIQUE_REASONS_PER_ID && h.reasons.has(outcome.type)){
       h.counts[outcome.type] = (h.counts[outcome.type] || 0) + 1;
-      recentById.set(id, now);
-      return;
+      recentById.set(id, now); return;
     }
     h.reasons.add(outcome.type);
     h.events.push(outcome);
@@ -139,15 +142,15 @@ function renderHistory(){
   const degSummary = Object.keys(degHist).sort((a,b)=>Number(a)-Number(b)).map(k=>`d=${k}:${degHist[k]}`).join('  ');
   document.getElementById('histSummary').textContent =
 `Symbols tracked: ${hist.size}
-First-event breakdown: ${Object.entries(totals).map(([k,v])=>\`${'${'}k}${'='}${'${'}v}\`).join('  ')}
+First-event breakdown: ${Object.entries(totals).map(([k,v])=>`${k}=${v}`).join('  ')}
 Degree histogram (accepted): ${degSummary}
 Raw degree-1 seen: ${rawDeg1Seen}`;
   const recent = Array.from(hist.entries()).slice(-20);
   const lines = [];
   for (const [id, h] of recent){
     const f = h.first;
-    const evs = h.events.map(e => `${'${'}e.type}${'${'}(e.d!=null?\`(d=${'${'}e.d}\`) : ''}${'}'}@${'${'}(e.t % 1e7)|0}`).join(', ');
-    lines.push(`i=${'${'}id}  first=${'${'}f.type}${'${'}(f.d!=null?\`(d=${'${'}f.d}\`) : '')}  counts=${'${'}JSON.stringify(h.counts)}  | ${'${'}evs}`);
+    const evs = h.events.map(e => `${e.type}${(e.d!=null?`(d=${e.d})`:'')}@${(e.t % 1e7)|0}`).join(', ');
+    lines.push(`i=${id}  first=${f.type}${(f.d!=null?`(d=${f.d})`:'')}  counts=${JSON.stringify(h.counts)}  | ${evs}`);
   }
   document.getElementById('histList').textContent = lines.join('\n');
 }
@@ -235,9 +238,9 @@ function assembleAndEnableSave(){
   const finalBytes = out.slice(0, sess.len);
   const url = URL.createObjectURL(new Blob([finalBytes], {type:"application/octet-stream"}));
   const saveBtn = document.getElementById('saveBtn');
-  saveBtn.onclick = () => { const a = document.createElement('a'); a.href = url; a.download = `qrstream_${'${'}sess.sid}.bin`; a.click(); };
+  saveBtn.onclick = () => { const a = document.createElement('a'); a.href = url; a.download = `qrstream_${sess.sid}.bin`; a.click(); };
   saveBtn.disabled = false;
-  msg(`✅ Reconstructed ${'${'}finalBytes.length} bytes. Save is enabled.`);
+  msg(`✅ Reconstructed ${finalBytes.length} bytes. Save is enabled.`);
 }
 
 /***** UI helpers *****/
@@ -263,8 +266,8 @@ function updateEqStats(){
   }
   const minDeg = (m === Infinity ? 0 : m);
   document.getElementById('eqstats').textContent =
-`Equations: ${'${'}sess.eqs.length}, min degree in system: ${'${'}minDeg} (d1=${'${'}d1}, d2=${'${'}d2}, d3=${'${'}d3})
-Total deg=1 seen (raw): ${'${'}rawDeg1Seen}`;
+`Equations: ${sess.eqs.length}, min degree in system: ${minDeg} (d1=${d1}, d2=${d2}, d3=${d3})
+Total deg=1 seen (raw): ${rawDeg1Seen}`;
 }
 
 /***** Camera and detection *****/
@@ -282,7 +285,6 @@ function sizeOverlayToVideo(){
   overlay.width = r.width; overlay.height = r.height;
 }
 function drawDetectionBoxes(codes){
-  // Always draw boxes (no toggle)
   sizeOverlayToVideo();
   octx.clearRect(0, 0, overlay.width, overlay.height);
   octx.lineWidth = 2; octx.strokeStyle = '#00e676';
@@ -303,28 +305,30 @@ function drawDetectionBoxes(codes){
 async function listCameras(){
   const devs = await navigator.mediaDevices.enumerateDevices();
   cameraSel.innerHTML = "";
-  for (const d of devs){ if (d.kind === 'videoinput'){
-    const opt = document.createElement('option');
-    opt.value = d.deviceId; opt.textContent = d.label || `Camera ${'${'}cameraSel.length+1}`;
-    cameraSel.appendChild(opt);
-  }}
+  for (const d of devs){
+    if (d.kind === 'videoinput'){
+      const opt = document.createElement('option');
+      opt.value = d.deviceId; opt.textContent = d.label || `Camera ${cameraSel.length+1}`;
+      cameraSel.appendChild(opt);
+    }
+  }
   if (!deviceId && cameraSel.options.length){
     const envIdx = Array.from(cameraSel.options).findIndex(o => /back|rear|environment/i.test(o.textContent));
     cameraSel.selectedIndex = envIdx >= 0 ? envIdx : 0; deviceId = cameraSel.value;
   }
 }
-
 cameraSel.onchange = () => { deviceId = cameraSel.value; if (running){ stop(); start(); } };
 
 setInterval(() => {
   const track = stream ? stream.getVideoTracks()[0] : null;
   const st = track ? track.getSettings() : {};
   document.getElementById('camInfo').textContent =
-`Detections/s: ${'${'}detPerSec}   Accepted/s: ${'${'}accPerSec}
-Last raw length: ${'${'}lastLen}   QS1 prefix: ${'${'}hadPrefix}
-Video: ${'${'}vEl.videoWidth||0}x${'${'}vEl.videoHeight||0}  fps(set): ${'${'}st.frameRate||'?'}
-Reasons (per s): ${'${'}JSON.stringify(reasons)}  Last error: ${'${'}lastErr || '—'}`;
-  detPerSec = 0; accPerSec = 0; reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
+`Detections/s: ${detPerSec}   Accepted/s: ${accPerSec}
+Last raw length: ${lastLen}   QS1 prefix: ${hadPrefix}
+Video: ${vEl.videoWidth||0}x${vEl.videoHeight||0}  fps(set): ${st.frameRate||'?'}
+Reasons (per s): ${JSON.stringify(reasons)}  Last error: ${lastErr || '—'}`;
+  detPerSec = 0; accPerSec = 0;
+  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
 }, 1000);
 
 function showBasics(){
@@ -332,21 +336,18 @@ function showBasics(){
   const hasGUM = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
   const secure = window.isSecureContext;
   document.getElementById('diag').textContent =
-`BarcodeDetector: ${'${'}hasBD}
-getUserMedia: ${'${'}hasGUM}
-isSecureContext: ${'${'}secure} (protocol=${'${'}location.protocol})
-origin: ${'${'}location.origin || location.href}`;
+`BarcodeDetector: ${hasBD}
+getUserMedia: ${hasGUM}
+isSecureContext: ${secure} (protocol=${location.protocol})
+origin: ${location.origin || location.href}`;
 }
 showBasics();
 
 async function start(){
-  if (!('BarcodeDetector' in window)){
-    msg("❌ No BarcodeDetector. Use Chrome/Edge or desktop.");
-    return;
-  }
-  detector = new BarcodeDetector({formats:['qr_code']});
-  await listCameras();
   try{
+    if (!('BarcodeDetector' in window)){ msg("❌ No BarcodeDetector. Use Chrome/Edge or desktop."); return; }
+    detector = new BarcodeDetector({formats:['qr_code']});
+    await listCameras();
     const constraints = {
       video: deviceId ? { deviceId: { exact: deviceId } }
                       : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
@@ -354,14 +355,13 @@ async function start(){
     };
     stream = await navigator.mediaDevices.getUserMedia(constraints);
     vEl.srcObject = stream; await vEl.play();
+    running = true;
+    document.getElementById('startBtn').disabled = true;
+    document.getElementById('stopBtn').disabled = false;
+    requestAnimationFrame(loop);
   }catch(e){
-    msg('getUserMedia error: ' + (e && e.name ? e.name : e));
-    return;
+    msg('getUserMedia/Start error: ' + (e && e.name ? `${e.name}: ${e.message||e}` : e));
   }
-  running = true;
-  document.getElementById('startBtn').disabled = true;
-  document.getElementById('stopBtn').disabled = false;
-  requestAnimationFrame(loop);
 }
 
 function stop(){
@@ -373,20 +373,20 @@ function stop(){
 }
 
 document.getElementById('startBtn').onclick = start;
-.document.getElementById('stopBtn').onclick  = stop;
+document.getElementById('stopBtn').onclick  = stop;
 
-def function updateLastFrameDiag(frame, accepted, why){
-  const rHex = frame && (u32(frame.r)).toString(16).padStart(8,'0');
+function updateLastFrameDiag(frame, accepted, why){
+  const rHex = frame ? (u32(frame.r)).toString(16).padStart(8,'0') : '--------';
   const sHex = sess.fec_seed ? (sess.fec_seed).toString(16).padStart(8,'0') : '--------';
   const dShow = frame && frame.d;
   document.getElementById('last').textContent =
 `Last frame:
-  sid match: ${'${'}frame && (frame.sid === sess.sid)}
-  K   match: ${'${'}frame && (frame.K === sess.K)}
-  cs  match: ${'${'}frame && (frame.cs === sess.cs)}
-  r   match: ${'${'}frame && (u32(frame.r) === sess.fec_seed)}   (frame.r=0x${'${'}rHex}, sess.fec_seed=0x${'${'}sHex})
-  d (degree): ${'${'}dShow}
-  symId: ${'${'}frame ? frame.i : '–'}   accepted: ${'${'}accepted}   reason: ${'${'}why || '-'}`;
+  sid match: ${frame ? (frame.sid === sess.sid) : '–'}
+  K   match: ${frame ? (frame.K === sess.K) : '–'}
+  cs  match: ${frame ? (frame.cs === sess.cs) : '–'}
+  r   match: ${frame ? (u32(frame.r) === sess.fec_seed) : '–'}   (frame.r=0x${rHex}, sess.fec_seed=0x${sHex})
+  d (degree): ${dShow ?? '–'}
+  symId: ${frame ? frame.i : '–'}   accepted: ${accepted}   reason: ${why || '-'}`;
 }
 
 async function loop(){
@@ -402,6 +402,7 @@ async function loop(){
       const raw = code.rawValue || '';
       lastLen = raw.length; hadPrefix = raw.startsWith('QS1|');
       if (!hadPrefix) continue;
+
       let frame=null;
       try{ frame = JSON.parse(raw.slice(4)); }
       catch(e){ reasons.parse++; noteOutcome(-1, { t: performance.now(), type:'parse' }); updateLastFrameDiag(null,false,'parse'); renderHistory(); continue; }
@@ -441,7 +442,6 @@ async function loop(){
       updateUI(); updateLastFrameDiag(frame,true,'ok'); renderHistory();
     }
   } else {
-    // No detections this frame; clear overlay to avoid stale boxes
     octx.clearRect(0,0,overlay.width,overlay.height);
   }
   rafId = requestAnimationFrame(loop);
@@ -452,7 +452,7 @@ document.getElementById('exportHist').onclick = function(){
   const obj = Object.fromEntries(hist.entries());
   const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
-  a.download = `qr_hist_${'${'}Date.now()}.json`; a.click();
+  a.download = `qr_hist_${Date.now()}.json`; a.click();
 };
 </script>
 </html>
