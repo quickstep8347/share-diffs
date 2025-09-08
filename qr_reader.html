@@ -64,7 +64,12 @@
       <div><b>Diagnostics</b></div>
       <div id="diag" class="small" style="white-space:pre-wrap;margin-top:6px"></div>
       <div id="last" class="small" style="white-space:pre-wrap;margin-top:8px"></div>
-      <div id="eqstats" class="small" style="white-space:pre-wrap;margin-top:8px"></div>
+      <div style="margin-top:8px; display:flex; gap:8px; flex-wrap:wrap">
+        <button id="exportHist" class="secondary">Export history</button>
+        <label class="small"><input type="checkbox" id="freezeDiag"> Freeze updates</label>
+      </div>
+      <div id="histSummary" class="small" style="white-space:pre-wrap; margin-top:8px"></div>
+      <div id="histList" class="small" style="white-space:pre-wrap; max-height:240px; overflow:auto; border-top:1px solid #333; margin-top:6px; padding-top:6px"></div>
     </div>
   </div>
 </main>
@@ -91,74 +96,149 @@ class XorShift32 {
   randint(a,b){ return a + (this.rand32() % (b - a + 1)) }
 }
 
+/*** Diagnostics config ***/
+const DEDUP_WINDOW_MS = 220;       // ignore events for same id within this window
+const LOG_DUP_EVENTS = false;      // don't store 'dup' in history
+const UNIQUE_REASONS_PER_ID = true; // store only first + unique reasons per id
+const HISTORY_LIMIT = 2000;        // max symbol ids tracked
+
+/*** History structures and helpers ***/
+const hist = new Map();
+const recentById = new Map();
+let degHist = {};
+let rawDeg1Seen = 0;
+function hashIdxs(arr){ let h=0; for (let i=0;i<arr.length;i++){ h = (h*131 + (arr[i]|0))>>>0; } return ('00000000'+h.toString(16)).slice(-8); }
+
+function noteOutcome(id, outcome){
+  const now = outcome.t;
+  if (recentById.has(id) && (now - recentById.get(id) < DEDUP_WINDOW_MS)) return;
+  let h = hist.get(id);
+  if (!h){
+    if (hist.size >= HISTORY_LIMIT){
+      const oldestKey = hist.keys().next().value;
+      hist.delete(oldestKey);
+    }
+    h = {
+      first: outcome,
+      reasons: new Set([outcome.type]),
+      events: [outcome],
+      counts: { [outcome.type]: 1 },
+      lastTs: now
+    };
+    hist.set(id, h);
+  } else {
+    if (!LOG_DUP_EVENTS && outcome.type === 'dup'){ recentById.set(id, now); return; }
+    if (UNIQUE_REASONS_PER_ID && h.reasons.has(outcome.type)){
+      h.counts[outcome.type] = (h.counts[outcome.type] || 0) + 1;
+      recentById.set(id, now);
+      return;
+    }
+    h.reasons.add(outcome.type);
+    h.events.push(outcome);
+    if (h.events.length > 6) h.events.shift();
+    h.counts[outcome.type] = (h.counts[outcome.type] || 0) + 1;
+    h.lastTs = now;
+  }
+  recentById.set(id, now);
+}
+
+function renderHistory(){
+  const freeze = document.getElementById('freezeDiag')?.checked;
+  if (freeze) return;
+  const totals = { accept:0, dup:0, sid:0, K:0, cs:0, r:0, d:0, parse:0, plen:0, other:0 };
+  for (const [,h] of hist){
+    totals[h.first.type] = (totals[h.first.type] || 0) + 1;
+  }
+  const degSummary = Object.keys(degHist).sort((a,b)=>Number(a)-Number(b)).map(k=>`d=${k}:${degHist[k]}`).join('  ');
+  const histSummaryEl = document.getElementById('histSummary');
+  histSummaryEl.textContent =
+`Symbols tracked: ${hist.size}
+First-event breakdown: ${Object.entries(totals).map(([k,v])=>\`\${k}=\${v}\`).join('  ')}
+Degree histogram (accepted): ${degSummary}
+Raw degree-1 seen: ${rawDeg1Seen}`;
+  const histListEl = document.getElementById('histList');
+  const recent = Array.from(hist.entries()).slice(-20);
+  const lines = [];
+  for (const [id, h] of recent){
+    const f = h.first;
+    const evs = h.events.map(e => `${e.type}${e.d!=null?`(d=${e.d})`:''}@${(e.t % 1e7)|0}`).join(', ');
+    lines.push(`i=${id}  first=${f.type}${f.d!=null?`(d=${f.d})`:''}  counts=${JSON.stringify(h.counts)}  | ${evs}`);
+  }
+  histListEl.textContent = lines.join('\n');
+}
+
 /*** Session + Decoder ***/
 let sess = {
   sid:null, len:0, K:0, cs:0, fec_seed:0,
-  seen:new Set(), eqs:[], solved:new Map(), solvedCount:0,
-  deg1Total:0
+  seen:new Set(), eqs:[], solved:new Map(), solvedCount:0
 };
 
 function resetSession(meta){
   sess.sid = meta.sid;
-  sess.len = meta.len|0;
-  sess.K   = meta.K|0;
-  sess.cs  = meta.cs|0;
-  sess.fec_seed = u32(meta.r);     // unsigned seed
-  sess.seen.clear(); sess.eqs.length=0; sess.solved.clear(); sess.solvedCount=0; sess.deg1Total=0;
-  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, nod:0, other:0 };
-  updateUI(); updateEqStats();
+  sess.len = meta.len | 0;
+  sess.K   = meta.K | 0;
+  sess.cs  = meta.cs | 0;
+  sess.fec_seed = u32(meta.r);
+  sess.seen.clear(); sess.eqs.length = 0; sess.solved.clear(); sess.solvedCount = 0;
+  degHist = {};
+  rawDeg1Seen = 0;
+  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
+  updateUI(); updateEqStats(); renderHistory();
 }
 
 function chosenIndices(symId, d){
-  // REQUIRE d to be present
-  const rng = new XorShift32(u32(sess.fec_seed ^ symId ^ (sess.K<<16)));
-  const D = Math.max(1, Math.min(sess.K, d|0));
+  const rng = new XorShift32((sess.fec_seed ^ symId ^ (sess.K << 16)) >>> 0);
+  const D = Math.max(1, Math.min(sess.K, d | 0));
   const chosen = new Set();
-  while (chosen.size < D) chosen.add(rng.randint(0, sess.K-1));
-  return { idxs: Array.from(chosen).sort((a,b)=>a-b), d:D };
+  while (chosen.size < D){
+    chosen.add(rng.randint(0, sess.K - 1));
+  }
+  const idxs = Array.from(chosen).sort((a,b)=>a-b);
+  return { idxs, d: D, hash: hashIdxs(idxs) };
 }
 
 function ingestSymbol(symId, payload, degree){
   const sel = chosenIndices(symId, degree);
   const idxs = sel.idxs;
-  if (idxs.length===1) sess.deg1Total++;
+  if (idxs.length === 1) rawDeg1Seen++;
+  degHist[sel.d] = (degHist[sel.d] || 0) + 1;
   const data = payload.slice();
   for (const k of Array.from(sess.solved.keys()).sort((a,b)=>a-b)){
     const pos = idxs.indexOf(k);
-    if (pos>=0){
+    if (pos >= 0){
       const ck = sess.solved.get(k);
-      for (let i=0;i<data.length;i++) data[i]^=ck[i];
-      idxs.splice(pos,1);
+      for (let i=0;i<data.length;i++) data[i] ^= ck[i];
+      idxs.splice(pos, 1);
     }
   }
-  if (idxs.length===0) return;
-  sess.eqs.push({idxs:new Set(idxs), data});
+  if (idxs.length === 0) return;
+  sess.eqs.push({idxs: new Set(idxs), data});
   peel();
 }
 
 function peel(){
-  let progress=true;
+  let progress = true;
   while(progress){
-    progress=false;
+    progress = false;
     for (const e of sess.eqs){
-      if (e.idxs.size===1){
+      if (e.idxs.size === 1){
         const k = e.idxs.values().next().value;
         if (!sess.solved.has(k)){
           sess.solved.set(k, e.data);
           sess.solvedCount++;
           for (const f of sess.eqs){
-            if (f===e) continue;
+            if (f === e) continue;
             if (f.idxs.has(k)){
-              const ck = e.data, fd=f.data;
-              for (let i=0;i<fd.length;i++) fd[i]^=ck[i];
+              const ck = e.data, fd = f.data;
+              for (let i=0;i<fd.length;i++) fd[i] ^= ck[i];
               f.idxs.delete(k);
             }
           }
-          progress=true;
+          progress = true;
         }
       }
     }
-    sess.eqs = sess.eqs.filter(e=>e.idxs.size>0);
+    sess.eqs = sess.eqs.filter(e => e.idxs.size > 0);
   }
   updateUI(); updateEqStats();
   if (sess.solvedCount >= sess.K) assembleAndEnableSave();
@@ -168,17 +248,22 @@ function assembleAndEnableSave(){
   const out = new Uint8Array(sess.K * sess.cs);
   for (let k=0;k<sess.K;k++){
     const c = sess.solved.get(k) || new Uint8Array(sess.cs);
-    out.set(c, k*sess.cs);
+    out.set(c, k * sess.cs);
   }
   const finalBytes = out.slice(0, sess.len);
-  const url = URL.createObjectURL(new Blob([finalBytes],{type:"application/octet-stream"}));
+  const url = URL.createObjectURL(new Blob([finalBytes], {type:"application/octet-stream"}));
   const saveBtn = document.getElementById('saveBtn');
-  saveBtn.onclick = ()=>{ const a=document.createElement('a'); a.href=url; a.download=`qrstream_${sess.sid}.bin`; a.click(); };
+  saveBtn.onclick = () => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `qrstream_${sess.sid}.bin`;
+    a.click();
+  };
   saveBtn.disabled = false;
   msg(`✅ Reconstructed ${finalBytes.length} bytes. Save is enabled.`);
 }
 
-/*** UI ***/
+/*** UI helpers ***/
 function msg(s){ document.getElementById('msg').textContent = s; }
 function updateUI(){
   document.getElementById('sid').textContent = sess.sid || '–';
@@ -190,56 +275,87 @@ function updateUI(){
   document.getElementById('symCount').textContent = sess.seen.size;
   const need = sess.K ? Math.ceil(sess.K * 1.10) : 0;
   document.getElementById('need').textContent = need || '?';
-  const pct = sess.K ? Math.min(100, Math.floor((sess.solvedCount/sess.K)*100)) : 0;
+  const pct = sess.K ? Math.min(100, Math.floor((sess.solvedCount / sess.K) * 100)) : 0;
   document.getElementById('bar').style.width = pct + '%';
 }
-function minEqDegree(){ let m=Infinity; for (const e of sess.eqs) m=Math.min(m,e.idxs.size); return m===Infinity?0:m; }
 function updateEqStats(){
+  let m = Infinity, d1 = 0, d2 = 0, d3 = 0;
+  for (const e of sess.eqs){
+    const s = e.idxs.size;
+    m = Math.min(m, s);
+    if (s === 1) d1++; else if (s === 2) d2++; else if (s === 3) d3++;
+  }
+  const minDeg = (m === Infinity ? 0 : m);
   document.getElementById('eqstats').textContent =
-`Equations: ${sess.eqs.length}, min degree in system: ${minEqDegree()}
-Total deg=1 seen (raw): ${sess.deg1Total}`;
+`Equations: ${sess.eqs.length}, min degree in system: ${minDeg} (d1=${d1}, d2=${d2}, d3=${d3})
+Total deg=1 seen (raw): ${rawDeg1Seen}`;
 }
 
-/*** Camera + detector with diagnostics ***/
+/*** Camera and detection ***/
 const vEl = document.getElementById('video');
-const overlay = document.getElementById('overlay'); const octx = overlay.getContext('2d', {willReadFrequently:true});
-const cameraSel=document.getElementById('cameraSel'), useCanvas=document.getElementById('useCanvas');
-const downscale=document.getElementById('downscale'), drawBoxes=document.getElementById('drawBoxes');
+const overlay = document.getElementById('overlay');
+const octx = overlay.getContext('2d', {willReadFrequently:true});
+const cameraSel = document.getElementById('cameraSel');
+const useCanvas = document.getElementById('useCanvas');
+const downscale = document.getElementById('downscale');
+const drawBoxes = document.getElementById('drawBoxes');
 
-let running=false, detector=null, stream=null, rafId=null, deviceId=null;
-const off = document.createElement('canvas'); const offCtx=off.getContext('2d',{willReadFrequently:true});
-let detPerSec=0, accPerSec=0, lastLen=0, hadPrefix=false, lastErr="";
-let reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, nod:0, other:0 };
+let running = false, detector = null, stream = null, rafId = null, deviceId = null;
+const off = document.createElement('canvas');
+const offCtx = off.getContext('2d', {willReadFrequently:true});
+let detPerSec = 0, accPerSec = 0, lastLen = 0, hadPrefix = false, lastErr = "";
+let reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
 
-function sizeOverlayToVideo(){ const r=vEl.getBoundingClientRect(); overlay.width=r.width; overlay.height=r.height; }
+function sizeOverlayToVideo(){
+  const r = vEl.getBoundingClientRect();
+  overlay.width = r.width;
+  overlay.height = r.height;
+}
 function drawDetectionBoxes(codes){
-  if (!drawBoxes.checked){ octx.clearRect(0,0,overlay.width,overlay.height); return; }
-  sizeOverlayToVideo(); octx.clearRect(0,0,overlay.width,overlay.height);
-  octx.lineWidth=2; octx.strokeStyle='#00e676';
-  const rw=vEl.videoWidth||1, rh=vEl.videoHeight||1;
+  if (!drawBoxes.checked){
+    octx.clearRect(0, 0, overlay.width, overlay.height);
+    return;
+  }
+  sizeOverlayToVideo();
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  octx.lineWidth = 2;
+  octx.strokeStyle = '#00e676';
+  const rw = vEl.videoWidth || 1;
+  const rh = vEl.videoHeight || 1;
   for (const c of codes){
-    const pts=c.cornerPoints||[]; if (!pts.length) continue;
+    const pts = c.cornerPoints || [];
+    if (!pts.length) continue;
     octx.beginPath();
     for (let i=0;i<pts.length;i++){
-      const x=(pts[i].x/rw)*overlay.width, y=(pts[i].y/rh)*overlay.height;
-      if (i===0) octx.moveTo(x,y); else octx.lineTo(x,y);
-    } octx.closePath(); octx.stroke();
+      const x = (pts[i].x / rw) * overlay.width;
+      const y = (pts[i].y / rh) * overlay.height;
+      if (i === 0) octx.moveTo(x, y); else octx.lineTo(x, y);
+    }
+    octx.closePath();
+    octx.stroke();
   }
 }
 
 async function listCameras(){
-  const devs=await navigator.mediaDevices.enumerateDevices();
-  cameraSel.innerHTML=""; for (const d of devs) if (d.kind==='videoinput'){
-    const opt=document.createElement('option'); opt.value=d.deviceId; opt.textContent=d.label||`Camera ${cameraSel.length+1}`; cameraSel.appendChild(opt);
+  const devs = await navigator.mediaDevices.enumerateDevices();
+  cameraSel.innerHTML = "";
+  for (const d of devs){
+    if (d.kind === 'videoinput'){
+      const opt = document.createElement('option');
+      opt.value = d.deviceId;
+      opt.textContent = d.label || `Camera ${cameraSel.length + 1}`;
+      cameraSel.appendChild(opt);
+    }
   }
   if (!deviceId && cameraSel.options.length){
-    const envIdx=Array.from(cameraSel.options).findIndex(o=>/back|rear|environment/i.test(o.textContent));
-    cameraSel.selectedIndex=envIdx>=0?envIdx:0; deviceId=cameraSel.value;
+    const envIdx = Array.from(cameraSel.options).findIndex(o => /back|rear|environment/i.test(o.textContent));
+    cameraSel.selectedIndex = envIdx >= 0 ? envIdx : 0;
+    deviceId = cameraSel.value;
   }
 }
-cameraSel.onchange=()=>{ deviceId=cameraSel.value; if (running){ stop(); start(); } };
+cameraSel.onchange = () => { deviceId = cameraSel.value; if (running){ stop(); start(); } };
 
-setInterval(()=>{
+setInterval(() => {
   const track = stream ? stream.getVideoTracks()[0] : null;
   const st = track ? track.getSettings() : {};
   document.getElementById('camInfo').textContent =
@@ -247,11 +363,15 @@ setInterval(()=>{
 Last raw length: ${lastLen}   QS1 prefix: ${hadPrefix}
 Video: ${vEl.videoWidth||0}x${vEl.videoHeight||0}  fps(set): ${st.frameRate||'?'}
 Reasons (per s): ${JSON.stringify(reasons)}  Last error: ${lastErr || '—'}`;
-  detPerSec=0; accPerSec=0; reasons={ sid:0, K:0, cs:0, r:0, dup:0, parse:0, nod:0, other:0 };
+  detPerSec = 0;
+  accPerSec = 0;
+  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
 }, 1000);
 
 function showBasics(){
-  const hasBD=('BarcodeDetector' in window), hasGUM=!!(navigator.mediaDevices&&navigator.mediaDevices.getUserMedia), secure=window.isSecureContext;
+  const hasBD = ('BarcodeDetector' in window);
+  const hasGUM = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia);
+  const secure = window.isSecureContext;
   document.getElementById('diag').textContent =
 `BarcodeDetector: ${hasBD}
 getUserMedia: ${hasGUM}
@@ -264,23 +384,41 @@ document.getElementById('startBtn').onclick = start;
 document.getElementById('stopBtn').onclick  = stop;
 
 async function start(){
-  if (!('BarcodeDetector' in window)){ msg("❌ No BarcodeDetector. Use Chrome/Edge or desktop."); return; }
+  if (!('BarcodeDetector' in window)){
+    msg("❌ No BarcodeDetector. Use Chrome/Edge or desktop.");
+    return;
+  }
   detector = new BarcodeDetector({formats:['qr_code']});
   await listCameras();
   try{
-    const constraints = { video: deviceId ? {deviceId:{exact:deviceId}} : {facingMode:{ideal:'environment'}, width:{ideal:1280}, height:{ideal:720}}, audio:false };
+    const constraints = {
+      video: deviceId ? { deviceId: { exact: deviceId } }
+                      : { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    };
     stream = await navigator.mediaDevices.getUserMedia(constraints);
-    vEl.srcObject = stream; await vEl.play();
-  }catch(e){ msg('getUserMedia error: ' + (e && e.name ? e.name : e)); return; }
-  running=true; document.getElementById('startBtn').disabled=true; document.getElementById('stopBtn').disabled=false;
+    vEl.srcObject = stream;
+    await vEl.play();
+  } catch(e){
+    msg('getUserMedia error: ' + (e && e.name ? e.name : e));
+    return;
+  }
+  running = true;
+  document.getElementById('startBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
   requestAnimationFrame(loop);
 }
 
 function stop(){
-  running=false; if (rafId) cancelAnimationFrame(rafId);
-  if (stream){ for (const t of stream.getTracks()) t.stop(); stream=null; }
-  document.getElementById('startBtn').disabled=false; document.getElementById('stopBtn').disabled=true;
-  octx.clearRect(0,0,overlay.width,overlay.height);
+  running = false;
+  if (rafId) cancelAnimationFrame(rafId);
+  if (stream){
+    for (const t of stream.getTracks()) t.stop();
+    stream = null;
+  }
+  document.getElementById('startBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  octx.clearRect(0, 0, overlay.width, overlay.height);
 }
 
 function updateLastFrameDiag(frame, accepted, why){
@@ -289,64 +427,112 @@ function updateLastFrameDiag(frame, accepted, why){
   const dShow = frame && frame.d;
   document.getElementById('last').textContent =
 `Last frame:
-  sid match: ${frame && (frame.sid===sess.sid)}
-  K   match: ${frame && (frame.K===sess.K)}
-  cs  match: ${frame && (frame.cs===sess.cs)}
-  r   match: ${frame && (u32(frame.r)===sess.fec_seed)}   (frame.r=0x${rHex}, sess.fec_seed=0x${sHex})
+  sid match: ${frame && (frame.sid === sess.sid)}
+  K   match: ${frame && (frame.K === sess.K)}
+  cs  match: ${frame && (frame.cs === sess.cs)}
+  r   match: ${frame && (u32(frame.r) === sess.fec_seed)}   (frame.r=0x${rHex}, sess.fec_seed=0x${sHex})
   d (degree): ${dShow}
-  symId: ${frame ? frame.i : '–'}   accepted: ${accepted}   reason: ${why||'-'}`;
+  symId: ${frame ? frame.i : '–'}   accepted: ${accepted}   reason: ${why || '-'}`;
 }
 
 async function loop(){
   if (!running) return;
-  let codes=[]; sizeOverlayToVideo();
+  sizeOverlayToVideo();
+  let codes = [];
   try{
     codes = await detector.detect(vEl);
     if (!codes.length && useCanvas.checked){
-      const ds=Math.max(1,Number(downscale.value));
-      const w=vEl.videoWidth||640, h=vEl.videoHeight||480;
-      off.width=Math.floor(w/ds); off.height=Math.floor(h/ds);
-      offCtx.imageSmoothingEnabled=false; offCtx.drawImage(vEl,0,0,off.width,off.height);
+      const ds = Math.max(1, Number(downscale.value));
+      const w = vEl.videoWidth || 640;
+      const h = vEl.videoHeight || 480;
+      off.width = Math.floor(w / ds);
+      off.height = Math.floor(h / ds);
+      offCtx.imageSmoothingEnabled = false;
+      offCtx.drawImage(vEl, 0, 0, off.width, off.height);
       codes = await detector.detect(off);
     }
-  }catch(e){ lastErr = e.message || String(e); }
-
+  } catch(e){
+    lastErr = e.message || String(e);
+  }
   if (codes && codes.length){
-    detPerSec += codes.length; drawDetectionBoxes(codes);
+    detPerSec += codes.length;
+    drawDetectionBoxes(codes);
     for (const code of codes){
       const raw = code.rawValue || '';
-      lastLen = raw.length; hadPrefix = raw.startsWith('QS1|');
+      lastLen = raw.length;
+      hadPrefix = raw.startsWith('QS1|');
       if (!hadPrefix) continue;
-      let frame=null;
-      try{ frame = JSON.parse(raw.slice(4)); }
-      catch(_){ reasons.parse++; updateLastFrameDiag(null,false,'parse'); continue; }
-
-      if (!sess.sid || sess.sid !== frame.sid) resetSession(frame);
-
-      const okSid = frame.sid===sess.sid;
-      const okK   = frame.K===sess.K;
-      const okCs  = frame.cs===sess.cs;
-      const okR   = u32(frame.r)===sess.fec_seed;
-      const okD   = (typeof frame.d==='number') && frame.d>=1 && frame.d<=sess.K;
-
-      if (!(okSid && okK && okCs && okR && okD)){
-        if (!okSid) reasons.sid++; else if (!okK) reasons.K++; else if (!okCs) reasons.cs++; else if (!okR) reasons.r++; else if (!okD) reasons.nod++; else reasons.other++;
-        updateLastFrameDiag(frame,false, !okSid?'sid':!okK?'K':!okCs?'cs':!okR?'r':'d');
+      let frame = null;
+      try {
+        frame = JSON.parse(raw.slice(4));
+      } catch(e){
+        reasons.parse++;
+        noteOutcome(-1, { t: performance.now(), type: 'parse' });
+        updateLastFrameDiag(null, false, 'parse');
+        renderHistory();
         continue;
       }
-
-      if (sess.seen.has(frame.i)){ reasons.dup++; updateLastFrameDiag(frame,false,'dup'); continue; }
-
-      // Accept
-      sess.seen.add(frame.i); accPerSec++;
-      const payload = b64uToBytes(frame.p);
+      if (!sess.sid || sess.sid !== frame.sid){
+        resetSession(frame);
+      }
+      const okSid = frame.sid === sess.sid;
+      const okK   = frame.K === sess.K;
+      const okCs  = frame.cs === sess.cs;
+      const okR   = u32(frame.r) === sess.fec_seed;
+      const okD   = (typeof frame.d === 'number') && frame.d >= 1 && frame.d <= sess.K;
+      let payload = null;
+      let okPlen = true;
+      try {
+        payload = b64uToBytes(frame.p);
+        okPlen = (payload.length === sess.cs);
+      } catch(e){
+        okPlen = false;
+      }
+      const now = performance.now();
+      if (!(okSid && okK && okCs && okR && okD && okPlen)){
+        const reason = !okSid ? 'sid'
+                      : !okK   ? 'K'
+                      : !okCs  ? 'cs'
+                      : !okR   ? 'r'
+                      : !okD   ? 'd'
+                      : !okPlen? 'plen'
+                      : 'other';
+        reasons[reason] = (reasons[reason] || 0) + 1;
+        noteOutcome(frame.i, { t: now, type: reason, d: frame.d, payloadLen: payload ? payload.length : undefined });
+        updateLastFrameDiag(frame, false, reason);
+        renderHistory();
+        continue;
+      }
+      if (sess.seen.has(frame.i)){
+        reasons.dup++;
+        noteOutcome(frame.i, { t: now, type: 'dup', d: frame.d });
+        updateLastFrameDiag(frame, false, 'dup');
+        renderHistory();
+        continue;
+      }
+      sess.seen.add(frame.i);
+      accPerSec++;
+      const sel = chosenIndices(frame.i, frame.d);
+      noteOutcome(frame.i, { t: now, type: 'accept', d: frame.d, idxsLen: sel.idxs.length, payloadLen: payload.length });
       ingestSymbol(frame.i, payload, frame.d);
-      updateUI(); updateLastFrameDiag(frame,true,'ok');
+      updateUI();
+      updateLastFrameDiag(frame, true, 'ok');
+      renderHistory();
     }
   } else {
     drawDetectionBoxes([]);
   }
   rafId = requestAnimationFrame(loop);
 }
+
+/*** Export history ***/
+document.getElementById('exportHist').onclick = function(){
+  const obj = Object.fromEntries(hist.entries());
+  const blob = new Blob([JSON.stringify(obj, null, 2)], {type:'application/json'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `qr_hist_${Date.now()}.json`;
+  a.click();
+};
 </script>
 </html>
