@@ -156,7 +156,7 @@ function resetSession(meta){
   sess.N   = meta.N | 0;
   sess.seen.clear(); sess.eqs.length = 0; sess.solved.clear(); sess.solvedCount = 0;
   degHist = {}; rawDeg1Seen = 0;
-  reasons = { sid:0, parse:0, other:0 };
+  reasons = { sid:0, parse:0, other:0, dup: 0 };
   updateUI(); updateEqStats(); renderHistory();
 }
 
@@ -255,7 +255,7 @@ const cameraSel = document.getElementById('cameraSel');
 
 let running = false, detector = null, stream = null, rafId = null, deviceId = null;
 let detPerSec = 0, accPerSec = 0, lastLen = 0, hadPrefix = false, lastErr = "";
-let reasons = { sid:0, parse:0, other:0 };
+let reasons = { sid:0, parse:0, other:0, dup: 0 };
 
 function sizeOverlayToVideo(){
   const r = vEl.getBoundingClientRect();
@@ -305,7 +305,7 @@ Last raw length: ${lastLen}   QS1 prefix: ${hadPrefix}
 Video: ${vEl.videoWidth||0}x${vEl.videoHeight||0}  fps(set): ${st.frameRate||'?'}
 Reasons (per s): ${JSON.stringify(reasons)}  Last error: ${lastErr || '—'}`;
   detPerSec = 0; accPerSec = 0;
-  reasons = { sid:0, parse:0, other:0 };
+  reasons = { sid:0, parse:0, other:0, dup: 0 };
 }, 1000);
 
 function showBasics(){
@@ -394,7 +394,7 @@ async function loop(){
 
       // Accept symbol
       sess.seen.add(frame.i); accPerSec++;
-      noteOutcome(frame.i, { t: now, type:'accept', idxsLen: sel.idxs.length, payloadLen: payload.length });
+      noteOutcome(frame.i, { t: now, type:'accept', idxsLen: frame.indices.length, payloadLen: payload.length });
       ingestSymbol(payload, frame.indices);
       updateUI(); updateLastFrameDiag(frame,true,'ok'); renderHistory();
     }
