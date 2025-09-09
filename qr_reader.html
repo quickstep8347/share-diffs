@@ -42,10 +42,9 @@
       <div><b>Status</b></div>
       <div class="kv small" style="margin-top:6px">
         <div>Session:</div>         <div><code id="sid">–</code></div>
-        <div>Symbols:</div>         <div><span id="symCount">0</span> / <span id="need">?</span> (unique)</div>
-        <div>K (chunks):</div>      <div><span id="K">?</span>, chunk: <span id="cs">?</span> B</div>
+        <div>Decoded Frames:</div>         <div><span id="symCount">0</span> / <span id="N">?</span></div>
         <div>Total bytes:</div>     <div><span id="tot">?</span></div>
-        <div>Recovered:</div>       <div><span id="rec">0</span> / <span id="K2">?</span></div>
+        <div>Recovered chunks:</div>       <div><span id="rec">0</span> / <span id="K">?</span></div>
       </div>
       <div class="small" style="margin-top:8px">Progress</div>
       <div style="height:12px;background:#333;border-radius:6px;overflow:hidden;margin:4px 0 2px">
@@ -84,17 +83,6 @@ function b64uToBytes(s){
   return ua;
 }
 
-/***** Tiny PRNG (match Python) *****/
-class XorShift32 {
-  constructor(seed){ this.state = (seed>>>0) || 0xDEADBEEF }
-  rand32(){
-    let x = this.state>>>0;
-    x ^= (x << 13) >>> 0; x ^= (x >>> 17) >>> 0; x ^= (x << 5) >>> 0;
-    this.state = x>>>0; return this.state>>>0;
-  }
-  randint(a,b){ return a + (this.rand32() % (b - a + 1)) }
-}
-
 /***** Diagnostics config *****/
 const DEDUP_WINDOW_MS = 220;
 const LOG_DUP_EVENTS = false;
@@ -106,9 +94,9 @@ const hist = new Map();
 const recentById = new Map();
 let degHist = {};
 let rawDeg1Seen = 0;
-function hashIdxs(arr){ let h=0; for (let i=0;i<arr.length;i++){ h = (h*131 + (arr[i]|0))>>>0; } return ('00000000'+h.toString(16)).slice(-8); }
 
 function noteOutcome(id, outcome){
+  // outcome needs to have t and type
   const now = outcome.t;
   if (recentById.has(id) && (now - recentById.get(id) < DEDUP_WINDOW_MS)) return;
   let h = hist.get(id);
@@ -157,7 +145,7 @@ Raw degree-1 seen: ${rawDeg1Seen}`;
 
 /***** Session + Decoder *****/
 let sess = {
-  sid:null, len:0, K:0, cs:0, fec_seed:0,
+  sid:null, len:0, K:0,
   seen:new Set(), eqs:[], solved:new Map(), solvedCount:0
 };
 
@@ -165,29 +153,19 @@ function resetSession(meta){
   sess.sid = meta.sid;
   sess.len = meta.len | 0;
   sess.K   = meta.K | 0;
-  sess.cs  = meta.cs | 0;
-  sess.fec_seed = u32(meta.r);
+  sess.N   = meta.N | 0;
   sess.seen.clear(); sess.eqs.length = 0; sess.solved.clear(); sess.solvedCount = 0;
   degHist = {}; rawDeg1Seen = 0;
-  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
+  reasons = { sid:0, parse:0, other:0 };
   updateUI(); updateEqStats(); renderHistory();
 }
 
-function chosenIndices(symId, d){
-  const rng = new XorShift32((sess.fec_seed ^ symId ^ (sess.K << 16)) >>> 0);
-  const D = Math.max(1, Math.min(sess.K, d | 0));
-  const chosen = new Set();
-  while (chosen.size < D){ chosen.add(rng.randint(0, sess.K - 1)); }
-  const idxs = Array.from(chosen).sort((a,b)=>a-b);
-  return { idxs, d: D, hash: hashIdxs(idxs) };
-}
 
-function ingestSymbol(symId, payload, degree){
-  const sel = chosenIndices(symId, degree);
-  const idxs = sel.idxs;
+function ingestSymbol(payload, idxs){
   if (idxs.length === 1) rawDeg1Seen++;
-  degHist[sel.d] = (degHist[sel.d] || 0) + 1;
+  degHist[idxs.length] = (degHist[idxs.length] || 0) + 1;
   const data = payload.slice();
+  // xor with already solved i from idxs and remove i from idxs:
   for (const k of Array.from(sess.solved.keys()).sort((a,b)=>a-b)){
     const pos = idxs.indexOf(k);
     if (pos >= 0){
@@ -230,10 +208,12 @@ function peel(){
 }
 
 function assembleAndEnableSave(){
-  const out = new Uint8Array(sess.K * sess.cs);
+  const out = new Uint8Array(sess.len);
+  let offset=0
   for (let k=0;k<sess.K;k++){
-    const c = sess.solved.get(k) || new Uint8Array(sess.cs);
-    out.set(c, k * sess.cs);
+    const c = sess.solved.get(k);
+    offset += c.length
+    out.set(c, offset);
   }
   const finalBytes = out.slice(0, sess.len);
   const url = URL.createObjectURL(new Blob([finalBytes], {type:"application/octet-stream"}));
@@ -248,13 +228,10 @@ function msg(s){ document.getElementById('msg').textContent = s; }
 function updateUI(){
   document.getElementById('sid').textContent = sess.sid || '–';
   document.getElementById('K').textContent = sess.K || '?';
-  document.getElementById('K2').textContent = sess.K || '?';
-  document.getElementById('cs').textContent = sess.cs || '?';
+  document.getElementById('N').textContent = sess.N || '?';
   document.getElementById('tot').textContent = sess.len || '?';
   document.getElementById('rec').textContent = sess.solvedCount || 0;
   document.getElementById('symCount').textContent = sess.seen.size;
-  const need = sess.K ? Math.ceil(sess.K * 1.10) : 0;
-  document.getElementById('need').textContent = need || '?';
   const pct = sess.K ? Math.min(100, Math.floor((sess.solvedCount / sess.K) * 100)) : 0;
   document.getElementById('bar').style.width = pct + '%';
 }
@@ -278,7 +255,7 @@ const cameraSel = document.getElementById('cameraSel');
 
 let running = false, detector = null, stream = null, rafId = null, deviceId = null;
 let detPerSec = 0, accPerSec = 0, lastLen = 0, hadPrefix = false, lastErr = "";
-let reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
+let reasons = { sid:0, parse:0, other:0 };
 
 function sizeOverlayToVideo(){
   const r = vEl.getBoundingClientRect();
@@ -328,7 +305,7 @@ Last raw length: ${lastLen}   QS1 prefix: ${hadPrefix}
 Video: ${vEl.videoWidth||0}x${vEl.videoHeight||0}  fps(set): ${st.frameRate||'?'}
 Reasons (per s): ${JSON.stringify(reasons)}  Last error: ${lastErr || '—'}`;
   detPerSec = 0; accPerSec = 0;
-  reasons = { sid:0, K:0, cs:0, r:0, dup:0, parse:0, d:0, plen:0, other:0 };
+  reasons = { sid:0, parse:0, other:0 };
 }, 1000);
 
 function showBasics(){
@@ -376,15 +353,11 @@ document.getElementById('startBtn').onclick = start;
 document.getElementById('stopBtn').onclick  = stop;
 
 function updateLastFrameDiag(frame, accepted, why){
-  const rHex = frame ? (u32(frame.r)).toString(16).padStart(8,'0') : '--------';
-  const sHex = sess.fec_seed ? (sess.fec_seed).toString(16).padStart(8,'0') : '--------';
-  const dShow = frame && frame.d;
+  const dShow = frame && frame.indices.length;
   document.getElementById('last').textContent =
 `Last frame:
   sid match: ${frame ? (frame.sid === sess.sid) : '–'}
   K   match: ${frame ? (frame.K === sess.K) : '–'}
-  cs  match: ${frame ? (frame.cs === sess.cs) : '–'}
-  r   match: ${frame ? (u32(frame.r) === sess.fec_seed) : '–'}   (frame.r=0x${rHex}, sess.fec_seed=0x${sHex})
   d (degree): ${dShow ?? '–'}
   symId: ${frame ? frame.i : '–'}   accepted: ${accepted}   reason: ${why || '-'}`;
 }
@@ -409,36 +382,20 @@ async function loop(){
 
       if (!sess.sid || sess.sid !== frame.sid) resetSession(frame);
 
-      const okSid = frame.sid === sess.sid;
-      const okK   = frame.K === sess.K;
-      const okCs  = frame.cs === sess.cs;
-      const okR   = u32(frame.r) === sess.fec_seed;
-      const okD   = (typeof frame.d === 'number') && frame.d >= 1 && frame.d <= sess.K;
-
-      let payload = null; let okPlen = true;
-      try{ payload = b64uToBytes(frame.p); okPlen = (payload.length === sess.cs); }
-      catch(e){ okPlen = false; }
+      let payload = b64uToBytes(frame.p);
 
       const now = performance.now();
-      if (!(okSid && okK && okCs && okR && okD && okPlen)){
-        const reason = !okSid?'sid':!okK?'K':!okCs?'cs':!okR?'r':!okD?'d':'plen';
-        reasons[reason] = (reasons[reason]||0)+1;
-        noteOutcome(frame.i, { t: now, type: reason, d: frame.d, payloadLen: payload ? payload.length : undefined });
-        updateLastFrameDiag(frame,false,reason); renderHistory();
-        continue;
-      }
 
       if (sess.seen.has(frame.i)){
-        reasons.dup++; noteOutcome(frame.i, { t: now, type:'dup', d: frame.d });
+        reasons.dup++; noteOutcome(frame.i, { t: now, type:'dup'});
         updateLastFrameDiag(frame,false,'dup'); renderHistory();
         continue;
       }
 
       // Accept symbol
       sess.seen.add(frame.i); accPerSec++;
-      const sel = chosenIndices(frame.i, frame.d);
-      noteOutcome(frame.i, { t: now, type:'accept', d: frame.d, idxsLen: sel.idxs.length, payloadLen: payload.length });
-      ingestSymbol(frame.i, payload, frame.d);
+      noteOutcome(frame.i, { t: now, type:'accept', idxsLen: sel.idxs.length, payloadLen: payload.length });
+      ingestSymbol(payload, frame.indices);
       updateUI(); updateLastFrameDiag(frame,true,'ok'); renderHistory();
     }
   } else {
