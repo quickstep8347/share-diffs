@@ -357,9 +357,7 @@ def generate_qr_site(
     index_path = out / "index.html"
     index_path.write_text(html, encoding="utf-8")
 
-    print(f"[ok] Site written to: {index_path}")
-    print(f"Serve it with:  python -m http.server -d {out} 8000")
-    print(f"Open sender at: http://localhost:8000")
+    print(f"[ok] Site written to: {index_path}. Open the file in a browser.")
     return str(index_path)
 
 
@@ -371,7 +369,7 @@ if __name__ == "__main__":
     out_path = generate_qr_site(
         payload,
         out_dir="qr_sender",
-        # chunk_size=512,  # scan-friendly default
+        chunk_size=1024,  # scan-friendly default
         # overhead=0.5,
         # ecc="L",
         fps_default=5,
