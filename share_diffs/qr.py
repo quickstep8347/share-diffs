@@ -1,7 +1,4 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-qr.py — Generate a self-contained QR streaming website for air-gapped transfer.
+"""qr.py — Generate a self-contained QR streaming website for air-gapped transfer.
 
 Changes vs previous version:
 - Adds "d" (LT degree) to every frame so the receiver can decode deterministically.
@@ -19,13 +16,17 @@ Dependency: 'qrcode' (pure Python, with SVG image factory). No Pillow, no ffmpeg
   pip install qrcode
 """
 
-import os, json, math, base64, hashlib, pathlib
-from typing import List, Tuple
+import base64
+import hashlib
+import json
+import math
+import os
+import pathlib
 
 import qrcode
-from qrcode.constants import ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q, ERROR_CORRECT_H
-from qrcode.image.svg import SvgPathImage
+from qrcode.constants import ERROR_CORRECT_H, ERROR_CORRECT_L, ERROR_CORRECT_M, ERROR_CORRECT_Q
 from qrcode.exceptions import DataOverflowError
+from qrcode.image.svg import SvgPathImage
 
 # ----------------- tiny helpers -----------------
 
@@ -41,82 +42,39 @@ def sha256_hex(b: bytes) -> str:
 # ----------------- LT fountain (encoder only) -----------------
 
 
-class XorShift32:
-    def __init__(self, seed: int):
-        self.state = (seed or 0xDEADBEEF) & 0xFFFFFFFF
-
-    def rand32(self) -> int:
-        x = self.state
-        x ^= (x << 13) & 0xFFFFFFFF
-        x ^= (x >> 17) & 0xFFFFFFFF
-        x ^= (x << 5) & 0xFFFFFFFF
-        self.state = x & 0xFFFFFFFF
-        return self.state
-
-    def randint(self, a: int, b: int) -> int:
-        return a + (self.rand32() % (b - a + 1))
+def select_indices(K: int, N: int, i: int) -> list[int]:
+    """Choose the indices of chunks based on K=number of chunks, N=number of frames (K*(1+overhead)), i=index of frame"""
+    if i < K:
+        return [i]
+    d = int(K / (N - K) + 0.5)
+    return list(range(d * (i - K), min(K, d * (i - K + 1))))
 
 
-def robust_soliton_cdf(K: int, c: float = 0.1, delta: float = 0.5) -> List[float]:
-    R = max(1, int(c * math.log(K / delta) * math.sqrt(K)))
-    tau = [0.0] * (K + 1)
-    for d in range(1, K):
-        cut = max(1, K // R)
-        if 1 <= d < cut:
-            tau[d] = R / (d * K)
-        elif d == cut:
-            tau[d] = R * math.log(R / delta) / K
-    rho = [0.0] * (K + 1)
-    rho[1] = 1.0 / K
-    for d in range(2, K + 1):
-        rho[d] = 1.0 / (d * (d - 1))
-    Z = sum(rho[1:]) + sum(tau[1:])
-    pmf = [(rho[d] + tau[d]) / Z for d in range(K + 1)]
-    cdf = [0.0]
-    s = 0.0
-    for d in range(1, K + 1):
-        s += pmf[d]
-        cdf.append(s)
-    cdf[-1] = 1.0
-    return cdf
-
-
-def sample_degree(cdf: List[float], rng: XorShift32) -> int:
-    u = (rng.rand32() & 0xFFFFFFFF) / 0x100000000
-    lo, hi = 1, len(cdf) - 1
-    while lo < hi:
-        mid = (lo + hi) // 2
-        if cdf[mid] >= u:
-            hi = mid
-        else:
-            lo = mid + 1
-    return lo
-
-
-def lt_encode_symbol(chunks: List[bytes], sym_id: int, fec_seed: int, cdf: List[float]) -> Tuple[bytes, int]:
+def lt_encode_symbol(chunks: list[bytes], N: int, i: int) -> tuple[bytes, list[int]]:
     """
     Generate one LT symbol by XORing a random subset of source chunks.
-    Returns (payload_bytes, degree_d). The receiver will use 'd' to avoid any float drift.
+    Returns (payload_bytes, list[indices]). The receiver will use the indices to know which frames where xored
     """
-    K = len(chunks)
-    rng = XorShift32((fec_seed ^ sym_id ^ (K << 16)) & 0xFFFFFFFF)
-    d = max(1, min(K, sample_degree(cdf, rng)))
-    chosen = set()
-    while len(chosen) < d:
-        chosen.add(rng.randint(0, K - 1))
-    idxs = sorted(chosen)
+    # K = len(chunks)
+    # d = max(1, min(K, sample_degree(cdf)))
+    # chosen = set()
+    # while len(chosen) < d:
+    #     chosen.add(random.randint(0, K - 1))
+    # idxs = sorted(chosen)
+    idxs = select_indices(len(chunks), N, i)
     out = bytearray(chunks[idxs[0]])
     for j in idxs[1:]:
         cj = chunks[j]
-        for i in range(len(out)):
-            out[i] ^= cj[i]
-    return bytes(out), d
+        for k in range(len(out)):
+            out[k] ^= cj[k]
+    return bytes(out), idxs
 
 
 # ----------------- Frames -----------------
 
 
 def build_frames(data: bytes, chunk_size: int, overhead: float):
+    """The data is chunked into chunks. Random amount of chunk-indices are then sampled to xor some of the chunks together into frames."""
     total_len = len(data)
     # chunk & pad
     chunks = [bytearray(data[i : i + chunk_size]) for i in range(0, total_len, chunk_size)]
@@ -130,24 +88,22 @@ def build_frames(data: bytes, chunk_size: int, overhead: float):
     K = len(chunks)
 
     # Fountain seed as UNSIGNED 32-bit
-    fec_seed = int.from_bytes(os.urandom(4), "big") & 0xFFFFFFFF
     sid = os.urandom(8)
     sid_b64 = b64u(sid)
-    cdf = robust_soliton_cdf(K)
+    # cdf = robust_soliton_cdf(K)
 
     N = int(math.ceil(K * (1.0 + overhead)))  # frames per loop
     frames = []
     for sym in range(N):
-        payload, d = lt_encode_symbol(chunks, sym, fec_seed, cdf)
+        payload, indices = lt_encode_symbol(chunks, N, sym)
         frame = {
             "v": 1,
-            "sid": sid_b64,
-            "len": total_len,
-            "K": K,
-            "cs": cs,
-            "i": sym,
-            "r": fec_seed,  # unsigned 32-bit
-            "d": d,  # degree for deterministic decoding
+            "sid": sid_b64,  # session id
+            "len": total_len,  # total (all chunks) payload size in bytes
+            "K": K,  # number of chunks total
+            "i": sym,  # index of the frame
+            "N": N,  # total number of frames
+            "indices": indices,  # indices of chunks that were xored into payload
             "p": b64u(payload),
             "x": b64u(os.urandom(2)),  # small salt to bust renderer caching
         }
@@ -162,30 +118,20 @@ _ECC_MAP = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q, "H
 from xml.etree import ElementTree as ET
 
 
-def save_qr_svg(text: str, path: str, ecc: str = "M", version: int | None = None, crisp_px: int | None = 1000):
+def save_qr_svg(text: str, path: str, ecc: str = "M", crisp_px: int | None = 1000):
     """
     Render a QR as SVG (no Pillow). If version is None -> auto-size (fit=True).
     If version is an int -> enforce cap (fit=False); raise DataOverflowError if it won't fit.
     After saving, patch the <svg> root to avoid duplicate width/height and add crisp rendering hints.
     """
-    if version is None:
-        qr = qrcode.QRCode(
-            version=None,
-            error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
-            box_size=10,
-            border=4,
-        )
-        qr.add_data(text)
-        qr.make(fit=True)
-    else:
-        qr = qrcode.QRCode(
-            version=version,
-            error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
-            box_size=10,
-            border=4,
-        )
-        qr.add_data(text)
-        qr.make(fit=False)
+    qr = qrcode.QRCode(
+        version=None,
+        error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
+        box_size=10,
+        border=4,
+    )
+    qr.add_data(text)
+    qr.make(fit=True)
 
     img = qr.make_image(image_factory=SvgPathImage)
     img.save(path)
@@ -218,52 +164,6 @@ def save_qr_svg(text: str, path: str, ecc: str = "M", version: int | None = None
     except Exception:
         # If patching fails, keep the original (it still renders inside <img>)
         pass
-
-
-def save_qr_svg_old(text: str, path: str, ecc: str = "M", version: int | None = None, crisp_px: int | None = 1000):
-    """
-    Render a QR as SVG (no Pillow). If version is None -> auto-size (fit=True).
-    If version is an int -> enforce cap (fit=False); raise DataOverflowError if it won't fit.
-    Optionally patch the SVG for crisp rendering and fixed pixel width/height.
-    """
-    if version is None:
-        qr = qrcode.QRCode(
-            version=None,
-            error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
-            box_size=10,
-            border=4,
-        )
-        qr.add_data(text)
-        qr.make(fit=True)
-    else:
-        qr = qrcode.QRCode(
-            version=version,
-            error_correction=_ECC_MAP.get(ecc, ERROR_CORRECT_M),
-            box_size=10,
-            border=4,
-        )
-        qr.add_data(text)
-        # fit=False to enforce the cap; if it doesn't fit, this will raise on make_image
-        # (library raises on make() too sometimes; keep fit=False to be explicit)
-        qr.make(fit=False)
-
-    img = qr.make_image(image_factory=SvgPathImage)
-    img.save(path)
-
-    if crisp_px:
-        # Patch the top-level <svg ...> tag to add crisp rendering hints and fixed pixel size
-        try:
-            txt = pathlib.Path(path).read_text(encoding="utf-8")
-            if "<svg " in txt:
-                txt = txt.replace(
-                    "<svg ",
-                    f'<svg shape-rendering="crispEdges" text-rendering="optimizeSpeed" '
-                    f'image-rendering="pixelated" width="{crisp_px}" height="{crisp_px}" ',
-                    1,
-                )
-                pathlib.Path(path).write_text(txt, encoding="utf-8")
-        except Exception:
-            pass
 
 
 # ----------------- HTML player -----------------
@@ -398,23 +298,17 @@ setFrame(0);
 
 def generate_qr_site(
     data: bytes,
-    out_dir: str,
     *,
+    out_dir: str = "qr_sender",
     chunk_size: int = 512,
     overhead: float = 0.12,
     ecc: str = "M",
-    version: int | None = None,  # 1..40 to CAP, or None to auto-size
     fps_default: int = 5,
     title: str = "QR Stream Sender",
     crisp_svg_px: int = 1000,
 ) -> str:
     """
     Build frames + website into out_dir. Returns path to index.html.
-
-    Notes:
-      - If version is None: QR size auto-scales per frame.
-      - If version is an int: we ENFORCE the cap; if a frame doesn't fit, a DataOverflowError is raised
-        with guidance to either increase 'version' or lower 'chunk_size'.
     """
     out = pathlib.Path(out_dir)
     frames_dir = out / "frames"
@@ -426,27 +320,26 @@ def generate_qr_site(
 
     # Render frames
     N = len(frames)
-    pad_width = max(4, len(str(N)))
+    pad_width = len(str(N))
     for i, fr in enumerate(frames, 1):
         txt = "QS1|" + json.dumps(fr, separators=(",", ":"))
         fname = f"frame_{str(i).zfill(pad_width)}.svg"
         try:
-            save_qr_svg(txt, str(frames_dir / fname), ecc=ecc, version=version, crisp_px=crisp_svg_px)
+            save_qr_svg(txt, str(frames_dir / fname), ecc=ecc, crisp_px=crisp_svg_px)
         except DataOverflowError as e:
-            raise DataOverflowError(
-                f"QR content for frame {i} will not fit into version={version} (ECC={ecc}). "
-                f"Increase 'version' or reduce 'chunk_size'. Original error: {e}"
-            ) from e
+            msg = (
+                f"QR content for frame {i} will not fit into (ECC={ecc}). "
+                f"Increase reduce 'chunk_size'. Original error: {e}"
+            )
+            raise DataOverflowError(msg) from e
 
     # Manifest
     manifest = {
-        "sid": meta["sid"],
-        "len": meta["len"],
-        "K": meta["K"],
-        "cs": meta["cs"],
-        "N": N,
-        "ecc": ecc,
-        "version": version if version is not None else "auto",
+        "sid": meta["sid"],  # session id
+        "len": meta["len"],  # len
+        "K": meta["K"],  # number of chunks
+        "N": N,  # number of frames (qr-codes) ~=(1+overhead)*K
+        "ecc": ecc,  # error correction within qr-code
         "sha256": file_hash,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
@@ -477,11 +370,10 @@ if __name__ == "__main__":
     payload = b"Hello QR stream over SVG frames! " * 400  # ~13 KB example
     out_path = generate_qr_site(
         payload,
-        out_dir="qr_site_out6",
-        chunk_size=256,  # scan-friendly default
-        overhead=0.12,
-        ecc="L",
-        version=18,  # cap size; set to None for auto
+        out_dir="qr_sender",
+        # chunk_size=512,  # scan-friendly default
+        # overhead=0.5,
+        # ecc="L",
         fps_default=5,
         title="QR Stream Sender (SVG, deterministic)",
         crisp_svg_px=1000,
