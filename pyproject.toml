@@ -1,6 +1,6 @@
 [project]
 name = "share-diffs"
-version = "0.2.0"
+version = "0.3.0"
 description = "A library that provides helper tools to sync repos with encryption in transit when github is not available."
 authors = [
     { name = "Joel GOTSCH", email = "joel.gotsch@gmail.com" },
@@ -9,14 +9,20 @@ readme = "README.md"
 requires-python = ">=3.10,<4"
 packages = [{include = "share_diffs"}]
 
-
-
 dependencies = [
-    "cryptography>=42.0.4"
-    "pydantic>=2.10.6"
-    "gitpython>=3.1.44"
+    "cryptography>=42.0.4",
+    "pydantic>=2.10.6",
+    "gitpython>=3.1.44",
 ]
 
+
+[project.optional-dependencies] 
+pdf = [
+    "pypdf>=6.0.0",
+]
+qr = [
+    "qrcode>=8.2",
+]
 
 [dependency-groups]
 dev = [
